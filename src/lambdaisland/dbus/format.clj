@@ -14,24 +14,28 @@
 (defn byte-buffer ^ByteBuffer []
   (ByteBuffer/allocate *default-buffer-size*))
 
-(declare get-array get-byte get-signature get-string get-string get-uint32
-         put-array put-byte put-signature put-string put-string put-uint32
+(declare get-array get-byte get-signature get-string get-string
+         put-array put-byte put-signature put-string put-string
+         get-bool get-double get-int16 get-int32 get-int64
+         put-bool put-double put-int16 put-int32 put-int64
+         get-uint16 get-uint32 get-uint64
+         put-uint16 put-uint32 put-uint64
          sig->type)
 
 (def types
-  [{:id :bool :sig \b}
-   {:id :byte :sig \y :read get-byte :write put-byte}
-   {:id :double :sig \d}
-   {:id :int16 :sig \n}
-   {:id :int32 :sig \i}
-   {:id :int64 :sig \x}
-   {:id :object-path :sig \o :read get-string :write put-string}
-   {:id :signature :sig \g :read get-signature :write put-signature}
-   {:id :string :sig \s :read get-string :write put-string}
-   {:id :uint16 :sig \q}
-   {:id :uint32 :sig \u :read get-uint32 :write put-uint32}
-   {:id :uint64 :sig \t}
-   {:id :array :sig \a :read get-array :write put-array}
+  [{:id :bool :sig \b :read #'get-bool :write #'put-bool}
+   {:id :byte :sig \y :read #'get-byte :write #'put-byte}
+   {:id :double :sig \d :read #'get-double :write #'put-double}
+   {:id :int16 :sig \n :read #'get-int16 :write #'put-int16}
+   {:id :int32 :sig \i :read #'get-int32 :write #'put-int32}
+   {:id :int64 :sig \x :read #'get-int64 :write #'put-int64}
+   {:id :object-path :sig \o :read #'get-string :write #'put-string}
+   {:id :signature :sig \g :read #'get-signature :write #'put-signature}
+   {:id :string :sig \s :read #'get-string :write #'put-string}
+   {:id :uint16 :sig \q :read #'get-uint16 :write #'put-uint16}
+   {:id :uint32 :sig \u :read #'get-uint32 :write #'put-uint32}
+   {:id :uint64 :sig \t :read #'get-uint64 :write #'put-uint64}
+   {:id :array :sig \a :read #'get-array :write #'put-array}
    {:id :variant :sig \v}
    {:id :struct :sig \( :sig-end\)}])
 
@@ -75,7 +79,7 @@
         end (+ (.position buf) len)]
     (loop [res []]
       (if (< (.position buf) end)
-        (recur (conj res (doto (read-fn buf) prn)))
+        (recur (conj res (read-fn buf)))
         res))))
 
 (defn get-struct [^ByteBuffer buf read-fns]
@@ -110,6 +114,12 @@
              (fn [buf]
                (for [t (rest t)]
                  (read-type buf t))))
+           :array
+           (fn [buf]
+             (get-array buf #(read-type % (second t))))
+           :struct
+           (fn [buf]
+             (get-struct buf (map (fn [t] #(read-type % t)) (rest t))))
            :variant
            (fn [buf]
              (let [sig (get-signature buf)]
@@ -217,7 +227,65 @@
   (.put buf (byte (bit-and (long v) 0xff))))
 
 (defn put-uint32 [^ByteBuffer buf v]
+  (align buf 4)
   (.putInt buf (int (bit-and (long v) 0xffffffff))))
+
+(defn get-bool [^ByteBuffer buf]
+  (align buf 4)
+  (let [v (.getInt buf)]
+    (if (= v 1) true false)))
+
+(defn get-int16 [^ByteBuffer buf]
+  (align buf 2)
+  (.getShort buf))
+
+(defn get-int32 [^ByteBuffer buf]
+  (align buf 4)
+  (.getInt buf))
+
+(defn get-int64 [^ByteBuffer buf]
+  (align buf 8)
+  (.getLong buf))
+
+(defn get-uint16 [^ByteBuffer buf]
+  (align buf 2)
+  (bit-and (.getShort buf) 0xffff))
+
+(defn get-uint64 [^ByteBuffer buf]
+  (align buf 8)
+  (bit-and (.getLong buf) 0xffffffffffffffff))
+
+(defn get-double [^ByteBuffer buf]
+  (align buf 8)
+  (.getDouble buf))
+
+(defn put-bool [^ByteBuffer buf v]
+  (align buf 4)
+  (.putInt buf (if v 1 0)))
+
+(defn put-int16 [^ByteBuffer buf v]
+  (align buf 2)
+  (.putShort buf (short v)))
+
+(defn put-int32 [^ByteBuffer buf v]
+  (align buf 4)
+  (.putInt buf (int v)))
+
+(defn put-int64 [^ByteBuffer buf v]
+  (align buf 8)
+  (.putLong buf (long v)))
+
+(defn put-uint16 [^ByteBuffer buf v]
+  (align buf 2)
+  (.putShort buf (short (bit-and (long v) 0xffff))))
+
+(defn put-uint64 [^ByteBuffer buf v]
+  (align buf 8)
+  (.putLong buf (bit-and (long v) 0xffffffffffffffff)))
+
+(defn put-double [^ByteBuffer buf v]
+  (align buf 8)
+  (.putDouble buf (double v)))
 
 (defn write-array [^ByteBuffer buf write-elements-fn]
   (align buf 4)
@@ -252,6 +320,16 @@
           (fn [buf vs]
             (doall
              (map (partial write-type buf) (rest t) vs))))
+        :array
+        (fn [buf v]
+          (write-array buf
+                      (fn [buf]
+                        (doseq [elem v]
+                          (write-type buf (second t) elem)))))
+        :struct
+        (fn [buf vs]
+          (doall
+           (map (partial write-type buf) (rest t) vs)))
         :variant
         (fn [buf v]
           (put-signature buf (type->sig (second t)))
