@@ -85,4 +85,4 @@
     {:socket chan
      :buffer buf
      :id id
-     :assigned-name (ffirst (:body (msg/read-message (ByteBuffer/wrap (msg/sock-read chan)))))}))
+     :assigned-name (ffirst (:body (format/read-message (ByteBuffer/wrap (format/sock-read chan)))))}))

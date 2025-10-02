@@ -10,32 +10,154 @@
 (set! *warn-on-reflection* true)
 
 (def ^:dynamic *default-buffer-size* 4096)
+(def ^:dynamic *buffer-offset* 0)
 
 (defn byte-buffer ^ByteBuffer []
   (ByteBuffer/allocate *default-buffer-size*))
 
-(declare get-array get-byte get-signature get-string get-string
-         put-array put-byte put-signature put-string put-string
-         get-bool get-double get-int16 get-int32 get-int64
-         put-bool put-double put-int16 put-int32 put-int64
-         get-uint16 get-uint32 get-uint64
-         put-uint16 put-uint32 put-uint64
-         sig->type)
+(defn align [^ByteBuffer buf size]
+  (dotimes [_ (mod (- size (mod (- (.position buf) *buffer-offset*) size)) size)]
+    (.put buf (byte 0)))
+  buf)
+
+;; Type reader functions
+
+(defn get-bool [^ByteBuffer buf]
+  (align buf 4)
+  (let [v (.getInt buf)]
+    (if (= v 1) true false)))
+
+(defn get-int16 [^ByteBuffer buf]
+  (align buf 2)
+  (.getShort buf))
+
+(defn get-int32 [^ByteBuffer buf]
+  (align buf 4)
+  (.getInt buf))
+
+(defn get-int64 [^ByteBuffer buf]
+  (align buf 8)
+  (.getLong buf))
+
+;; While the DBUS spec considers BYTE an unsigned type, we've decided to
+;; read/write it as a Java byte value, meaning signed between -128 and 127
+(defn get-byte [^ByteBuffer buf]
+  (.get buf))
+
+;; These do read as unsigned, so they always return natural numbers, possibly
+;; promoting implicitly to a bigger type
+(defn get-uint16 [^ByteBuffer buf]
+  (align buf 2)
+  (let [s (.getShort buf)]
+    (if (neg? s)
+      (bit-and s 0xffff)
+      s)))
+
+(defn get-uint32 [^ByteBuffer buf]
+  (align buf 4)
+  (let [i (.getInt buf)]
+    (if (neg? i)
+      (bit-and i 0xffffffff)
+      i)))
+
+(defn get-uint64 [^ByteBuffer buf]
+  (align buf 8)
+  (let [l (.getLong buf)]
+    (if (neg? l)
+      (bigint (java.lang.Long/toUnsignedString l))
+      l)))
+
+(defn get-double [^ByteBuffer buf]
+  (align buf 8)
+  (.getDouble buf))
+
+(defn get-struct [^ByteBuffer buf read-fns]
+  (align buf 8)
+  (mapv #(% buf) read-fns))
+
+(defn get-string [^ByteBuffer buf]
+  (align buf 4)
+  (let [len (get-uint32 buf)
+        res (String. ^bytes (let [ba (byte-array len)]
+                              (.get buf ba 0 len)
+                              ba))]
+    (.get buf) ;; NULL
+    res))
+
+(defn get-signature [^ByteBuffer buf]
+  (let [len (get-byte buf)
+        res (String. ^bytes (let [ba (byte-array len)]
+                              (.get buf ba 0 len)
+                              ba))]
+    (.get buf) ;; NULL
+    res))
+
+;; Type writer functions
+
+(defn put-bool [^ByteBuffer buf v]
+  (align buf 4)
+  (.putInt buf (if v 1 0)))
+
+(defn put-int16 [^ByteBuffer buf v]
+  (align buf 2)
+  (.putShort buf (short v)))
+
+(defn put-int32 [^ByteBuffer buf v]
+  (align buf 4)
+  (.putInt buf (int v)))
+
+(defn put-int64 [^ByteBuffer buf v]
+  (align buf 8)
+  (.putLong buf (long v)))
+
+;; Use unchecked variants here so Java implicitly can convert from unsigned to
+;; signed through two's complement truncation
+(defn put-byte [^ByteBuffer buf v]
+  (.put buf (unchecked-byte v)))
+
+(defn put-uint32 [^ByteBuffer buf v]
+  (align buf 4)
+  (.putInt buf (unchecked-int v)))
+
+(defn put-uint16 [^ByteBuffer buf v]
+  (align buf 2)
+  (.putShort buf (unchecked-short v)))
+
+(defn put-uint64 [^ByteBuffer buf v]
+  (align buf 8)
+  (.putLong buf (unchecked-long v)))
+
+(defn put-double [^ByteBuffer buf v]
+  (align buf 8)
+  (.putDouble buf (double v)))
+
+(defn put-string [^ByteBuffer buf s]
+  (align buf 4)
+  (let [b (.getBytes ^String s)]
+    (.putInt buf (count b))
+    (.put buf b)
+    (.put buf (byte 0))))
+
+(defn put-signature [^ByteBuffer buf s]
+  (let [b (.getBytes ^String s)]
+    (.put buf (byte (count b)))
+    (.put buf b)
+    (.put buf (byte 0))))
 
 (def types
-  [{:id :bool :sig \b :read #'get-bool :write #'put-bool}
-   {:id :byte :sig \y :read #'get-byte :write #'put-byte}
-   {:id :double :sig \d :read #'get-double :write #'put-double}
-   {:id :int16 :sig \n :read #'get-int16 :write #'put-int16}
-   {:id :int32 :sig \i :read #'get-int32 :write #'put-int32}
-   {:id :int64 :sig \x :read #'get-int64 :write #'put-int64}
-   {:id :object-path :sig \o :read #'get-string :write #'put-string}
-   {:id :signature :sig \g :read #'get-signature :write #'put-signature}
-   {:id :string :sig \s :read #'get-string :write #'put-string}
-   {:id :uint16 :sig \q :read #'get-uint16 :write #'put-uint16}
-   {:id :uint32 :sig \u :read #'get-uint32 :write #'put-uint32}
-   {:id :uint64 :sig \t :read #'get-uint64 :write #'put-uint64}
-   {:id :array :sig \a :read #'get-array :write #'put-array}
+  [{:id :bool :sig \b :read get-bool :write put-bool}
+   {:id :byte :sig \y :read get-byte :write put-byte}
+   {:id :double :sig \d :read get-double :write put-double}
+   {:id :int16 :sig \n :read get-int16 :write put-int16}
+   {:id :int32 :sig \i :read get-int32 :write put-int32}
+   {:id :int64 :sig \x :read get-int64 :write put-int64}
+   {:id :object-path :sig \o :read get-string :write put-string}
+   {:id :signature :sig \g :read get-signature :write put-signature}
+   {:id :string :sig \s :read get-string :write put-string}
+   {:id :uint16 :sig \q :read get-uint16 :write put-uint16}
+   {:id :uint32 :sig \u :read get-uint32 :write put-uint32}
+   {:id :uint64 :sig \t :read get-uint64 :write put-uint64}
+   {:id :array :sig \a}
    {:id :variant :sig \v}
    {:id :struct :sig \( :sig-end\)}])
 
@@ -59,19 +181,56 @@
 (def type->write-fn* (into {} (map (juxt :id :write)) types))
 (def type->read-fn* (into {} (map (juxt :id :read)) types))
 
-(def offset 0)
+(defn type->sig [t]
+  (if (vector? t)
+    (case (first t)
+      :tuple
+      (apply str (map type->sig (rest t)))
+      :array
+      (str "a" (type->sig (second t)))
+      :struct
+      (str "(" (apply str (map type->sig (rest t))) ")")
+      :variant
+      "v")
+    (str (type->sig* t))))
 
-(defn align [^ByteBuffer buf size]
-  (dotimes [_ (mod (- size (mod (- (.position buf) offset) size)) size)]
-    (.put buf (byte 0)))
-  buf)
+(defn sig->type [sig]
+  (cond
+    (char? sig)
+    (sig->type* sig)
+    (and (string? sig) (= 1 (.length ^String sig)))
+    (sig->type* (first sig))
+    :else
+    (let [ts (loop [t []
+                    [c & cs] sig]
+               (if (not c)
+                 t
+                 (case c
+                   \(
+                   ;; FIXME: deal with nesting properly
+                   (recur
+                    (conj t
+                          (into [:struct]
+                                (map sig->type)
+                                (take-while (complement #{\)}) cs)))
+                    (next (drop-while (complement #{\)}) cs)))
+                   \a
+                   (let [ts (sig->type (apply str cs))]
+                     (if (= :tuple (and (vector? ts) (first ts)))
+                       (apply conj t [:array (nth ts 1)] (nnext ts))
+                       (conj t [:array ts])))
 
-(defn get-byte [^ByteBuffer buf]
-  (bit-and (.get buf) 0xff))
 
-(defn get-uint32 [^ByteBuffer buf]
-  (align buf 4)
-  (bit-and (.getInt buf) 0xffffffff))
+                   \v
+                   (let [[_tuple & ts] (sig->type cs)]
+                     (into (conj t [:variant (first ts)]) (next ts)))
+
+                   #_else
+                   (recur (conj t (sig->type c))
+                          cs))))]
+      (if (= 1 (count ts))
+        (first ts)
+        (into [:tuple] ts)))))
 
 (defn get-array [^ByteBuffer buf read-fn]
   (align buf 4)
@@ -82,26 +241,16 @@
         (recur (conj res (read-fn buf)))
         res))))
 
-(defn get-struct [^ByteBuffer buf read-fns]
-  (align buf 8)
-  (mapv #(% buf) read-fns))
-
-(defn get-string [^ByteBuffer buf]
+(defn put-array [^ByteBuffer buf write-elements-fn]
   (align buf 4)
-  (let [len (get-uint32 buf)
-        res (String. ^bytes (let [ba (byte-array len)]
-                              (.get buf ba 0 len)
-                              ba))]
-    (.get buf) ;; NULL
-    res))
-
-(defn get-signature [^ByteBuffer buf]
-  (let [len (get-byte buf)
-        res (String. ^bytes (let [ba (byte-array len)]
-                              (.get buf ba 0 len)
-                              ba))]
-    (.get buf) ;; NULL
-    res))
+  (let [size-pos (.position buf)]
+    (.putInt buf 0)
+    (write-elements-fn buf)
+    (let [end-pos (.position buf)]
+      (.position buf size-pos)
+      (.putInt buf (- end-pos size-pos 4))
+      (.position buf end-pos)))
+  buf)
 
 (defn read-type [buf t]
   ((or (type->read-fn* t)
@@ -119,55 +268,16 @@
              (get-array buf #(read-type % (second t))))
            :struct
            (fn [buf]
-             (get-struct buf (map (fn [t] #(read-type % t)) (rest t))))
-           :variant
-           (fn [buf]
-             (let [sig (get-signature buf)]
-               (read-type buf (sig->type sig)))))
+             (get-struct buf (map (fn [t] #(read-type % t)) (rest t)))))
+
+         (= t :variant)
+         (fn [buf]
+           (let [sig (get-signature buf)]
+             (read-type buf (sig->type sig))))
 
          :else
          (throw (ex-info  "unimplemented type" {:t t}))))
    buf))
-
-(defn type->sig [t]
-  (if (vector? t)
-    (case (first t)
-      :tuple
-      (apply str (map type->sig (rest t)))
-      :array
-      (str "a" (type->sig (second t)))
-      :struct
-      (str "(" (apply str (map type->sig (rest t))) ")")
-      :variant
-      "v")
-    (str (type->sig* t))))
-
-(defn sig->type [sig]
-  (if (char? sig)
-    (sig->type* sig)
-    (loop [t [:tuple]
-           [c & cs] sig]
-      (if (not c)
-        t
-        (case c
-          \(
-          (recur
-           (conj t
-                 (into [:struct] (next (sig->type
-                                        (take-while (complement #{\)}) cs)))))
-           (next (drop-while (complement #{\)}) cs)))
-          \a
-          (recur
-           (conj t [:array (sig->type (first cs))])
-           (next cs))
-
-          \v
-          (let [[_tuple & ts] (sig->type cs)]
-            (into (conj t [:variant (first ts)]) (next ts)))
-
-          #_else
-          (recur (conj t (sig->type c))
-                 cs))))))
 
 (defn read-header [^ByteBuffer buf]
   (align buf 8)
@@ -177,17 +287,18 @@
         [h t] (nth headers code)
         sig (get-signature buf)
         v (read-type buf (sig->type sig))]
-    ;; (prn [(.position buf) h t v])
     [h v]))
 
+(defn byte-order [endian]
+  (case endian
+    :LITTLE_ENDIAN ByteOrder/LITTLE_ENDIAN
+    :BIG_ENDIAN    ByteOrder/BIG_ENDIAN))
+
 (defn read-message [^ByteBuffer buf]
-  (let [endian (.get buf)
-        _ (.order buf
-                  (case (char endian)
-                    \l
-                    ByteOrder/LITTLE_ENDIAN
-                    \B
-                    ByteOrder/BIG_ENDIAN))
+  (let [endian (case (char (.get buf))
+                 \l :LITTLE_ENDIAN
+                 \B :BIG_ENDIAN)
+        _ (.order buf (byte-order endian))
         msg-type (nth message-types (get-byte buf))
         flags (let [flags (get-byte buf)]
                 (cond-> {}
@@ -201,7 +312,8 @@
         len  (get-uint32 buf)
         serial  (get-uint32 buf)
         headers (into {} (get-array buf read-header))]
-    {:endian (char endian)
+    (align buf 8)
+    {:endian endian
      :type msg-type
      :flags flags
      :version version
@@ -209,94 +321,6 @@
      :serial serial
      :headers headers
      :body (read-type buf (sig->type (get headers :signature)))}))
-
-(defn put-string [^ByteBuffer buf s]
-  (align buf 4)
-  (let [b (.getBytes ^String s)]
-    (.putInt buf (count b))
-    (.put buf b)
-    (.put buf (byte 0))))
-
-(defn put-signature [^ByteBuffer buf s]
-  (let [b (.getBytes ^String s)]
-    (.put buf (byte (count b)))
-    (.put buf b)
-    (.put buf (byte 0))))
-
-(defn put-byte [^ByteBuffer buf v]
-  (.put buf (byte (bit-and (long v) 0xff))))
-
-(defn put-uint32 [^ByteBuffer buf v]
-  (align buf 4)
-  (.putInt buf (int (bit-and (long v) 0xffffffff))))
-
-(defn get-bool [^ByteBuffer buf]
-  (align buf 4)
-  (let [v (.getInt buf)]
-    (if (= v 1) true false)))
-
-(defn get-int16 [^ByteBuffer buf]
-  (align buf 2)
-  (.getShort buf))
-
-(defn get-int32 [^ByteBuffer buf]
-  (align buf 4)
-  (.getInt buf))
-
-(defn get-int64 [^ByteBuffer buf]
-  (align buf 8)
-  (.getLong buf))
-
-(defn get-uint16 [^ByteBuffer buf]
-  (align buf 2)
-  (bit-and (.getShort buf) 0xffff))
-
-(defn get-uint64 [^ByteBuffer buf]
-  (align buf 8)
-  (bit-and (.getLong buf) 0xffffffffffffffff))
-
-(defn get-double [^ByteBuffer buf]
-  (align buf 8)
-  (.getDouble buf))
-
-(defn put-bool [^ByteBuffer buf v]
-  (align buf 4)
-  (.putInt buf (if v 1 0)))
-
-(defn put-int16 [^ByteBuffer buf v]
-  (align buf 2)
-  (.putShort buf (short v)))
-
-(defn put-int32 [^ByteBuffer buf v]
-  (align buf 4)
-  (.putInt buf (int v)))
-
-(defn put-int64 [^ByteBuffer buf v]
-  (align buf 8)
-  (.putLong buf (long v)))
-
-(defn put-uint16 [^ByteBuffer buf v]
-  (align buf 2)
-  (.putShort buf (short (bit-and (long v) 0xffff))))
-
-(defn put-uint64 [^ByteBuffer buf v]
-  (align buf 8)
-  (.putLong buf (bit-and (long v) 0xffffffffffffffff)))
-
-(defn put-double [^ByteBuffer buf v]
-  (align buf 8)
-  (.putDouble buf (double v)))
-
-(defn write-array [^ByteBuffer buf write-elements-fn]
-  (align buf 4)
-  (let [size-pos (.position buf)]
-    (.putInt buf 0)
-    (write-elements-fn buf)
-    (let [end-pos (.position buf)]
-      (.position buf size-pos)
-      (.putInt buf (- end-pos size-pos 4))
-      (.position buf end-pos)))
-  buf)
 
 (defn show-buffer-lim [^ByteBuffer b]
   (let [p (.limit b)]
@@ -307,6 +331,23 @@
   (let [p (.position b)]
     (.position b 0)
     (repeatedly p #(.get b))))
+
+(defn derive-type [v]
+  (cond
+    (boolean? v)
+    :bool
+    (instance? Byte v)
+    :byte
+    (float? v)
+    :double
+    (int? v)
+    :int64
+    (string? v)
+    :string
+    (vector? v)
+    [:array (derive-type (first v))]
+    :else
+    (throw (ex-info "Can't derive type" {:v v}))))
 
 (defn write-type [buf t v]
   ((or
@@ -322,10 +363,10 @@
              (map (partial write-type buf) (rest t) vs))))
         :array
         (fn [buf v]
-          (write-array buf
-                      (fn [buf]
-                        (doseq [elem v]
-                          (write-type buf (second t) elem)))))
+          (put-array buf
+                     (fn [buf]
+                       (doseq [elem v]
+                         (write-type buf (second t) elem)))))
         :struct
         (fn [buf vs]
           (doall
@@ -334,6 +375,12 @@
         (fn [buf v]
           (put-signature buf (type->sig (second t)))
           (write-type buf (second t) v)))
+
+      (= t :variant)
+      (fn [buf v]
+        (let [t (derive-type v)]
+          (put-signature buf (type->sig t))
+          (write-type buf t v)))
 
       :else
       (throw (ex-info  "unimplemented type" {:t t}) )))
@@ -346,40 +393,40 @@
       (align buf 8)
       (let [t (get headers k)
             code (get hidx k)]
-        (println ["H" k code t v (.position buf)])
         (put-byte buf code)
         (write-type buf [:variant t] v)))
     buf))
 
-(defn write-message [^ByteBuffer buf {:keys [type flags headers version serial body]
-                                      :or {version 1}}]
-  (let [endian (.order buf)]
-    (put-byte buf (if (= endian ByteOrder/LITTLE_ENDIAN)
-                    \l
-                    \B))
-    (put-byte buf (.indexOf ^java.util.List message-types type))
-    (put-byte buf (cond-> 0
-                    (:no-reply-expected flags)
-                    (bit-or 1)
-                    (:no-auto-start flags)
-                    (bit-or 2)
-                    (:allow-interactive-authorization flags)
-                    (bit-or 3)))
-    (put-byte buf version)
+(defn write-message [^ByteBuffer buf {:keys [endian type flags headers version serial body]
+                                      :or {version 1
+                                           endian :LITTLE_ENDIAN}}]
+  (.order buf (byte-order endian))
+  (put-byte buf (case endian
+                  :LITTLE_ENDIAN (byte \l)
+                  :BIG_ENDIAN (byte \B)))
+  (put-byte buf (.indexOf ^java.util.List message-types type))
+  (put-byte buf (cond-> 0
+                  (:no-reply-expected flags)
+                  (bit-or 1)
+                  (:no-auto-start flags)
+                  (bit-or 2)
+                  (:allow-interactive-authorization flags)
+                  (bit-or 4)))
+  (put-byte buf version)
 
-    (let [body-length-pos (.position buf)]
-      (put-uint32 buf 0) ;;body length placeholder
-      (put-uint32 buf serial)
+  (let [body-length-pos (.position buf)]
+    (put-uint32 buf 0) ;;body length placeholder
+    (put-uint32 buf serial)
 
-      (write-array buf #(write-headers % headers))
-      (align buf 8)
-
-      (let [body-start-pos (.position buf)]
-        (write-type buf (sig->type (get headers :signature)) body)
-        (let [body-end-pos (.position buf)
-              body-len (- body-end-pos body-start-pos)]
-          (.putInt buf body-length-pos body-len))))
-    buf))
+    (put-array buf #(write-headers % headers))
+    (align buf 8)
+    (let [body-start-pos (.position buf)]
+      (write-type buf (sig->type (get headers :signature)) body)
+      (let [body-end-pos (.position buf)
+            body-len (- body-end-pos body-start-pos)]
+        (.putInt buf body-length-pos body-len)
+        (.position buf body-end-pos))))
+  buf)
 
 (defn sock-read ^bytes [^SocketChannel chan]
   (let [buf (byte-buffer)]
