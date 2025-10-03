@@ -12,3 +12,4 @@ resources/public/ui
 .store
 out
 .#*
+repl_sessions/mcp_repl_log.clj

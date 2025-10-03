@@ -61,20 +61,17 @@
               (gen/vector element-gen 2 10))))
 
 ;; Recursive generator for DBus types
+(def atomic-type-gen
+  (gen/elements
+   [:byte :bool :double :string
+    :int16 :int32 :int64
+    :uint16 :uint32 :uint64]))
+
 (def dbus-type-gen
   (gen/recursive-gen
    (fn [inner-gen]
      (gen/one-of
-      [(gen/return :byte)
-       (gen/return :bool)
-       (gen/return :double)
-       (gen/return :int16)
-       (gen/return :int32)
-       (gen/return :int64)
-       (gen/return :string)
-       (gen/return :uint16)
-       (gen/return :uint32)
-       (gen/return :uint64)
+      [atomic-type-gen
        (gen/tuple (gen/return :array)
                   inner-gen)
        (gen/tuple (gen/return :variant)
@@ -82,7 +79,7 @@
        (gen/bind (gen/choose 1 6)
                  (fn [n]
                    (apply gen/tuple (gen/return :struct) (repeat n inner-gen))))]))
-   (gen/elements [:byte :bool :double :int16 :int32 :int64 :string :uint16 :uint32 :uint64])))
+   atomic-type-gen))
 
 (defn type->value-gen [t]
   (cond
@@ -136,23 +133,31 @@
         _ (.flip buf)]
     (format/read-message buf)))
 
+(defn eq
+  "Normal clojure equality does not consider ##NaN equal to ##NaN, which prevents
+  us from checking that NaN round trips."
+  [this that]
+  (or (= this that)
+      (and (number? this) (NaN? this) (number? that) (NaN? that))
+      (and (sequential? this) (sequential? that)
+           (= (count this) (count that))
+           (every? identity (map eq this that)))
+      (and (map? this) (map? that)
+           (= (count this) (count that))
+           (every? identity (map #(eq (get this %)
+                                      (get that %))
+                                 (distinct
+                                  (concat (keys this)
+                                          (keys that))))))))
+
 (defn round-trip? [message]
   (let [read-message (round-trip message)]
-    (= (dissoc message :body-length)
-       (dissoc read-message :body-length))))
+    (eq (dissoc message :body-length)
+        (dissoc read-message :body-length))))
 
-(comment
-  ;; Property tests
-  (defspec round-trip-property 100
-    (prop/for-all [message message-call-gen]
-                  (try
-                    (round-trip? message)
-                    (catch Throwable t
-                      false))))
-
-  (test #'round-trip-property))
-
-(round-trip
- {:endian :LITTLE_ENDIAN, :type :method-call, :flags {}, :version 1, :body-length 0, :serial 0, :headers {:signature "ay", :path "/0", :interface "A.A", :member "A"}, :body []})
-
-(format/sig->type "ay")
+(defspec round-trip-property 100
+  (prop/for-all [message message-call-gen]
+                (try
+                  (round-trip? message)
+                  (catch Throwable t
+                    false))))

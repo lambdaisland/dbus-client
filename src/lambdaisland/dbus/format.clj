@@ -1,11 +1,11 @@
 (ns lambdaisland.dbus.format
   "Read/write the DBUS message format"
-  (:require
-   [clojure.java.io :as io])
   (:import
-   (java.net ServerSocket StandardProtocolFamily UnixDomainSocketAddress)
+   (clojure.lang BigInt)
+   (java.io Reader StringReader)
+   (java.net UnixDomainSocketAddress)
    (java.nio ByteBuffer ByteOrder)
-   (java.nio.channels ServerSocketChannel SocketChannel)))
+   (java.nio.channels SocketChannel)))
 
 (set! *warn-on-reflection* true)
 
@@ -72,8 +72,10 @@
   (.getDouble buf))
 
 (defn get-struct [^ByteBuffer buf read-fns]
-  (align buf 8)
-  (mapv #(% buf) read-fns))
+  (mapv (fn [f]
+          (align buf 8)
+          (f buf))
+        read-fns))
 
 (defn get-string [^ByteBuffer buf]
   (align buf 4)
@@ -194,43 +196,37 @@
       "v")
     (str (type->sig* t))))
 
+(declare read-sig)
+
+(defn read-struct-sig [rdr]
+  (loop [res [:struct]
+         t (read-sig rdr)]
+    (if (= :close-struct t)
+      res
+      (recur (conj res t) (read-sig rdr)))))
+
+(defn read-sig [^Reader rdr]
+  (let [i (.read rdr)]
+    (when-not (= -1 i)
+      (let [ch (char i)]
+        (case ch
+          \(
+          (read-struct-sig rdr)
+          \)
+          :close-struct
+          \a
+          [:array (read-sig rdr)]
+          (sig->type* ch))))))
+
 (defn sig->type [sig]
-  (cond
-    (char? sig)
-    (sig->type* sig)
-    (and (string? sig) (= 1 (.length ^String sig)))
-    (sig->type* (first sig))
-    :else
-    (let [ts (loop [t []
-                    [c & cs] sig]
-               (if (not c)
-                 t
-                 (case c
-                   \(
-                   ;; FIXME: deal with nesting properly
-                   (recur
-                    (conj t
-                          (into [:struct]
-                                (map sig->type)
-                                (take-while (complement #{\)}) cs)))
-                    (next (drop-while (complement #{\)}) cs)))
-                   \a
-                   (let [ts (sig->type (apply str cs))]
-                     (if (= :tuple (and (vector? ts) (first ts)))
-                       (apply conj t [:array (nth ts 1)] (nnext ts))
-                       (conj t [:array ts])))
-
-
-                   \v
-                   (let [[_tuple & ts] (sig->type cs)]
-                     (into (conj t [:variant (first ts)]) (next ts)))
-
-                   #_else
-                   (recur (conj t (sig->type c))
-                          cs))))]
-      (if (= 1 (count ts))
-        (first ts)
-        (into [:tuple] ts)))))
+  (let [rdr (StringReader. (str sig))]
+    (loop [ts []]
+      (if-let [t (read-sig rdr)]
+        (recur (conj ts t))
+        (case (count ts)
+          0 nil
+          1 (first ts)
+          (into [:tuple] ts))))))
 
 (defn get-array [^ByteBuffer buf read-fn]
   (align buf 4)
@@ -342,10 +338,14 @@
     :double
     (int? v)
     :int64
+    (or (instance? BigInt v) (instance? BigInteger v))
+    (if (< v 0)
+      :int64
+      :uint64)
     (string? v)
     :string
     (vector? v)
-    [:array (derive-type (first v))]
+    (into [:struct] (map derive-type) v)
     :else
     (throw (ex-info "Can't derive type" {:v v}))))
 
@@ -370,7 +370,10 @@
         :struct
         (fn [buf vs]
           (doall
-           (map (partial write-type buf) (rest t) vs)))
+           (map (fn [t v]
+                  (align buf 8)
+                  (write-type buf t v))
+                (rest t) vs)))
         :variant
         (fn [buf v]
           (put-signature buf (type->sig (second t)))
