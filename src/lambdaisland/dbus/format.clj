@@ -9,7 +9,7 @@
 
 (set! *warn-on-reflection* true)
 
-(def ^:dynamic *default-buffer-size* 4096)
+(def ^:dynamic *default-buffer-size* 8192)
 (def ^:dynamic *buffer-offset* 0)
 
 (defn byte-buffer ^ByteBuffer []
@@ -307,7 +307,8 @@
         version (get-byte buf)
         len  (get-uint32 buf)
         serial  (get-uint32 buf)
-        headers (into {} (get-array buf read-header))]
+        headers (into {} (get-array buf read-header))
+        sig (get headers :signature)]
     (align buf 8)
     {:endian endian
      :type msg-type
@@ -316,7 +317,7 @@
      :body-length len
      :serial serial
      :headers headers
-     :body (read-type buf (sig->type (get headers :signature)))}))
+     :body (when sig (read-type buf (sig->type sig)))}))
 
 (defn show-buffer-lim [^ByteBuffer b]
   (let [p (.limit b)]
@@ -424,39 +425,13 @@
     (put-array buf #(write-headers % headers))
     (align buf 8)
     (let [body-start-pos (.position buf)]
-      (write-type buf (sig->type (get headers :signature)) body)
+      (when-let [sig (get headers :signature)]
+        (write-type buf (sig->type (get headers :signature)) body))
       (let [body-end-pos (.position buf)
             body-len (- body-end-pos body-start-pos)]
         (.putInt buf body-length-pos body-len)
         (.position buf body-end-pos))))
   buf)
-
-(defn sock-read ^bytes [^SocketChannel chan]
-  (let [buf (byte-buffer)]
-    (.mark buf)
-    (let [len (.read chan buf)]
-      (if (< 0 len)
-        (let [arr (byte-array len)]
-          (.flip buf)
-          (.get buf arr 0 len)
-          arr)
-        (do
-          (println "WARN: read from closed channel")
-          (byte-array 0))))))
-
-(defn sock-write
-  ([^SocketChannel chan ^String s]
-   (let [buf (byte-buffer)]
-     (.mark buf)
-     (.put buf (.getBytes s))
-     (.flip buf)
-     (.write chan buf)))
-  ([^SocketChannel chan f & args]
-   (let [buf (byte-buffer)]
-     (.mark buf)
-     (apply f buf args)
-     (.flip buf)
-     (.write chan buf))))
 
 (defn write-to-str
   "Testing utility, takes a function that takes a buffer as its first argument,
@@ -471,13 +446,3 @@
       (.flip b)
       (.get b arr 0 len)
       (String. arr))))
-
-(defn sock-conn ^SocketChannel [^String sock-loc]
-  (SocketChannel/open (UnixDomainSocketAddress/of sock-loc)))
-
-(defn session-sock []
-  (let [[_ path] (re-find #"unix:path=(.*)" (System/getenv "DBUS_SESSION_BUS_ADDRESS"))]
-    (sock-conn path)))
-
-(defn system-sock []
-  (sock-conn "/run/dbus/system_bus_socket"))

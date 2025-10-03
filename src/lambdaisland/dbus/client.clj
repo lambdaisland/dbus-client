@@ -1,11 +1,15 @@
 (ns lambdaisland.dbus.client
   (:require
+   [clojure.string :as str]
    [lambdaisland.dbus.format :as format])
   (:import
    (java.net UnixDomainSocketAddress)
    (java.nio ByteBuffer)
    (java.nio.channels SocketChannel)
-   (java.nio.charset StandardCharsets)))
+   (java.nio.charset StandardCharsets)
+   (java.util.concurrent.atomic AtomicInteger)))
+
+(set! *warn-on-reflection* true)
 
 (def null-byte "\u0000")
 (def crlf "\r\n")
@@ -62,27 +66,109 @@
 (def hello-call
   {:type :method-call
    :flags {}
-   :version 1
-   :serial 1
    :headers
    {:path "/org/freedesktop/DBus"
     :member "Hello"
     :interface "org.freedesktop.DBus"
     :destination "org.freedesktop.DBus"}})
 
-(defn handshake [chan]
+(defn sock-read ^bytes [^ByteBuffer buf ^SocketChannel chan]
+  (.mark buf)
+  (let [len (.read chan buf)]
+    (if (< 0 len)
+      (let [arr (byte-array len)]
+        (.flip buf)
+        (.get buf arr 0 len)
+        arr)
+      (do
+        (println "WARN: read from closed channel")
+        (byte-array 0)))))
+
+(defn write-message [{:keys [^SocketChannel socket ^ByteBuffer buffer serial replies]} msg]
+  (let [serial (.incrementAndGet ^AtomicInteger serial)
+        reply (promise)]
+    (println "SERIAL" serial)
+    (swap! replies assoc serial reply)
+    (.clear buffer)
+    (format/write-message buffer (doto (assoc msg :serial serial) prn))
+    (.flip buffer)
+    (.write socket buffer)
+    reply))
+
+(defn init-client! [^SocketChannel chan handler]
   (write-str chan
              (str auth-external
                   data-cmd
                   negotiate-unix-fd
                   begin-cmd))
   (let [buf (format/byte-buffer)
+        read-buf (format/byte-buffer)
+        serial (AtomicInteger. 0)
+        replies (atom {})
         id (loop [[line & lines] (read-handshake-lines chan buf)]
+             (println line)
              (if-let [[_ id] (re-find #"OK ([0-9a-f]*)\r\n" line)]
                id
-               (recur lines)))]
-    (format/sock-write chan format/write-message hello-call)
-    {:socket chan
-     :buffer buf
-     :id id
-     :assigned-name (ffirst (:body (format/read-message (ByteBuffer/wrap (format/sock-read chan)))))}))
+               (recur lines)))
+        client {:socket chan
+                :buffer buf
+                :id id
+                :replies replies
+                :serial serial
+                :handler handler}]
+    (future
+      (try
+        (while true
+          (.clear read-buf)
+          (println "READ" (.read chan read-buf))
+          (.flip read-buf)
+          (let [msg (format/read-message read-buf)]
+            (when-let [reply (get @replies (get-in msg [:headers :reply-serial]))]
+              (swap! replies dissoc (:serial msg))
+              (deliver reply msg))
+            (handler msg)))
+        (catch Throwable t
+          (def ttt t))
+        (finally
+          (println "Read loop broken"))))
+    (let [hello-reply (write-message client hello-call)]
+      (assoc client :assigned-name (:body @hello-reply)))))
+
+(defn sock-conn ^SocketChannel [^String sock-loc]
+  (SocketChannel/open (UnixDomainSocketAddress/of sock-loc)))
+
+(defn session-sock []
+  (let [[_ path] (re-find #"unix:path=(.*)" (System/getenv "DBUS_SESSION_BUS_ADDRESS"))]
+    (sock-conn path)))
+
+(defn system-sock []
+  (sock-conn "/run/dbus/system_bus_socket"))
+
+(defn munge-introspection [{:keys [attrs content]}]
+  (reduce (fn [acc o]
+            (assoc-in acc [({:property :properties}
+                            (:tag o)
+                            (keyword (str (name (:tag o)) "s")))
+                           (get-in o [:attrs :name])]
+                      (munge-introspection o)))
+          attrs
+          (filter map? content)))
+
+(defn introspect [client {:keys [destination path]}]
+  (let [body (:body
+              @(write-message client
+                              {:type :method-call
+                               :headers
+                               {:interface   "org.freedesktop.DBus.Introspectable"
+                                :member      "Introspect"
+                                :destination destination
+                                :path        path}}))]
+    ;; Remove doctype, or we get
+    ;; 1. Unhandled javax.xml.stream.XMLStreamException
+    ;; ParseError at [row,col]:[1,3] Message: The markup declarations contained or
+    ;; pointed to by the document type declaration must be well-formed.
+    ;; XMLStreamReaderImpl.java:  652  com.sun.org.apache.xerces.internal.impl.XMLStreamReaderImpl/next
+    (-> body
+        (str/replace #"^<!DOCTYPE[^>]+>" "")
+        xml/parse-str
+        munge-introspection)))
