@@ -1,0 +1,17 @@
+#!/usr/bin/env bb
+
+(ns proj (:require [lioss.main :as lioss]
+                   [lioss.subshell :as subshell]
+                   [clojure.java.io :as io]
+                   [clojure.string :as str]
+                   [lioss.version :as version]))
+
+(lioss/main
+ {:license          :mpl
+  :inception-year   2025
+  :description      "Pure-clojure DBUS client"
+  :group-id         "com.lambdaisland"})
+
+;; Local Variables:
+;; mode:clojure
+;; End:
