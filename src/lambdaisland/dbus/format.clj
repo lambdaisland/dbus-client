@@ -3,17 +3,19 @@
   (:import
    (clojure.lang BigInt)
    (java.io Reader StringReader)
-   (java.net UnixDomainSocketAddress)
    (java.nio ByteBuffer ByteOrder)
-   (java.nio.channels SocketChannel)))
+   (java.nio.charset StandardCharsets)))
 
 (set! *warn-on-reflection* true)
 
-(def ^:dynamic *default-buffer-size* 8192)
+(def ^:dynamic *default-buffer-size* 4096)
 (def ^:dynamic *buffer-offset* 0)
 
-(defn byte-buffer ^ByteBuffer []
-  (ByteBuffer/allocate *default-buffer-size*))
+(defn byte-buffer
+  (^ByteBuffer []
+   (byte-buffer *default-buffer-size*))
+  (^ByteBuffer [size]
+   (ByteBuffer/allocate size)))
 
 (defn align [^ByteBuffer buf size]
   (dotimes [_ (mod (- size (mod (- (.position buf) *buffer-offset*) size)) size)]
@@ -72,8 +74,8 @@
   (.getDouble buf))
 
 (defn get-struct [^ByteBuffer buf read-fns]
+  (align buf 8)
   (mapv (fn [f]
-          (align buf 8)
           (f buf))
         read-fns))
 
@@ -82,16 +84,18 @@
   (let [len (get-uint32 buf)
         res (String. ^bytes (let [ba (byte-array len)]
                               (.get buf ba 0 len)
-                              ba))]
-    (.get buf) ;; NULL
+                              ba)
+                     StandardCharsets/UTF_8)]
+    (assert (= 0 (.get buf))) ;; NULL
     res))
 
 (defn get-signature [^ByteBuffer buf]
   (let [len (get-byte buf)
         res (String. ^bytes (let [ba (byte-array len)]
                               (.get buf ba 0 len)
-                              ba))]
-    (.get buf) ;; NULL
+                              ba)
+                     StandardCharsets/UTF_8)]
+    (assert (= 0 (.get buf))) ;; NULL
     res))
 
 ;; Type writer functions
@@ -290,7 +294,7 @@
     :LITTLE_ENDIAN ByteOrder/LITTLE_ENDIAN
     :BIG_ENDIAN    ByteOrder/BIG_ENDIAN))
 
-(defn read-message [^ByteBuffer buf]
+(defn read-message-header [^ByteBuffer buf]
   (let [endian (case (char (.get buf))
                  \l :LITTLE_ENDIAN
                  \B :BIG_ENDIAN)
@@ -316,8 +320,17 @@
      :version version
      :body-length len
      :serial serial
-     :headers headers
-     :body (when sig (read-type buf (sig->type sig)))}))
+     :headers headers}))
+
+(defn read-body [buffer sig]
+  (read-type buffer (sig->type sig)))
+
+(defn read-message [^ByteBuffer buf]
+  (let [msg (read-message-header buf)
+        {:keys [sig]} msg]
+    (if sig
+      (assoc msg :body (read-body buf sig))
+      msg)))
 
 (defn show-buffer-lim [^ByteBuffer b]
   (let [p (.limit b)]
@@ -350,6 +363,8 @@
     :else
     (throw (ex-info "Can't derive type" {:v v}))))
 
+(declare put-struct)
+
 (defn write-type [buf t v]
   ((or
     (type->write-fn* t)
@@ -369,12 +384,7 @@
                        (doseq [elem v]
                          (write-type buf (second t) elem)))))
         :struct
-        (fn [buf vs]
-          (doall
-           (map (fn [t v]
-                  (align buf 8)
-                  (write-type buf t v))
-                (rest t) vs)))
+        #(put-struct buf (rest t) v)
         :variant
         (fn [buf v]
           (put-signature buf (type->sig (second t)))
@@ -389,6 +399,13 @@
       :else
       (throw (ex-info  "unimplemented type" {:t t}) )))
    buf v))
+
+(defn put-struct [buf ts vs]
+  (align buf 8)
+  (doall
+   (map (fn [t v]
+          (write-type buf t v))
+        ts vs)))
 
 (defn write-headers [^ByteBuffer buf header-map]
   (let [hidx (into {} (map-indexed (fn [idx [k v]] [k idx]) headers))
@@ -445,4 +462,4 @@
           arr (byte-array len)]
       (.flip b)
       (.get b arr 0 len)
-      (String. arr))))
+      (String. arr StandardCharsets/UTF_8))))

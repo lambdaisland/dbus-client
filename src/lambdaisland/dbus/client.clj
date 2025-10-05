@@ -1,8 +1,10 @@
 (ns lambdaisland.dbus.client
   (:require
+   [clojure.data.xml :as xml]
    [clojure.string :as str]
    [lambdaisland.dbus.format :as format])
   (:import
+   (java.io EOFException)
    (java.net UnixDomainSocketAddress)
    (java.nio ByteBuffer)
    (java.nio.channels SocketChannel)
@@ -87,15 +89,65 @@
 (defn write-message [{:keys [^SocketChannel socket ^ByteBuffer buffer serial replies]} msg]
   (let [serial (.incrementAndGet ^AtomicInteger serial)
         reply (promise)]
-    (println "SERIAL" serial)
     (swap! replies assoc serial reply)
     (.clear buffer)
-    (format/write-message buffer (doto (assoc msg :serial serial) prn))
+    (format/write-message buffer (assoc msg :serial serial))
     (.flip buffer)
     (.write socket buffer)
     reply))
 
-(defn init-client! [^SocketChannel chan handler]
+(defn read-fully
+  "Reads bytes from the SocketChannel into the buffer until the buffer
+  is full (i.e., position reaches limit), or the channel reaches end-of-stream.
+  Returns the total number of bytes read in this call."
+  [^SocketChannel channel ^ByteBuffer buffer]
+  (loop [total-read 0]
+    (let [bytes-read (.read channel buffer)]
+      (cond
+        (neg? bytes-read)
+        (throw (EOFException. "Connection closed while attempting to read full message body."))
+
+        (not (.hasRemaining buffer))
+        (+ total-read bytes-read)
+
+        :else
+        (recur (+ total-read bytes-read))))))
+
+(defn ensure-full-read
+  "Ensures the ByteBuffer contains at least 'body-len' bytes starting from its current position.
+  Reads more data from the channel if needed, re-allocating the buffer if required. "
+  [^SocketChannel chan ^ByteBuffer buf body-len]
+  (let [available-bytes (- (.limit buf) (.position buf))]
+    (if (<= body-len available-bytes)
+      buf
+      ;; Not enough bytes available to read the whole body. We need to read
+      ;; more.
+      (let [^ByteBuffer new-buf (doto (format/byte-buffer body-len)
+                                  (.order (.order buf)))
+            initial-position (.position buf)
+            bytes-to-read-from-channel (- body-len available-bytes)]
+        (.put new-buf (.slice buf))
+        (let [total-read (read-fully chan new-buf)]
+          (assert (<= bytes-to-read-from-channel total-read)))
+        (.flip new-buf)
+        new-buf))))
+
+#_(defn peek [^ByteBuffer buf]
+    (str (.order buf)
+         (String. ^bytes (let [ba (byte-array 100)]
+                           (.get (.duplicate buf) ba 0 100)
+                           ba)
+                  StandardCharsets/UTF_8)))
+
+(defn read-message [{:keys [^ByteBuffer read-buf ^SocketChannel socket]}]
+  (let [{:keys [headers body-length] :as msg} (format/read-message-header read-buf)
+        sig (:signature headers)]
+    (if (and sig (< 0 body-length))
+      (let [buffer (ensure-full-read socket read-buf body-length)]
+        (assoc msg :body (format/read-body buffer sig)))
+      msg)))
+
+(defn init-client! [^SocketChannel chan & [handler]]
   (write-str chan
              (str auth-external
                   data-cmd
@@ -105,6 +157,7 @@
         read-buf (format/byte-buffer)
         serial (AtomicInteger. 0)
         replies (atom {})
+        read-loop-error (promise)
         id (loop [[line & lines] (read-handshake-lines chan buf)]
              (println line)
              (if-let [[_ id] (re-find #"OK ([0-9a-f]*)\r\n" line)]
@@ -112,23 +165,26 @@
                (recur lines)))
         client {:socket chan
                 :buffer buf
+                :read-buf read-buf
                 :id id
                 :replies replies
                 :serial serial
-                :handler handler}]
+                :handler handler
+                :read-loop-error read-loop-error}]
     (future
       (try
         (while true
           (.clear read-buf)
-          (println "READ" (.read chan read-buf))
+          (.read chan read-buf)
           (.flip read-buf)
-          (let [msg (format/read-message read-buf)]
+          (let [msg (read-message client)]
             (when-let [reply (get @replies (get-in msg [:headers :reply-serial]))]
               (swap! replies dissoc (:serial msg))
               (deliver reply msg))
-            (handler msg)))
+            (when handler
+              (handler msg))))
         (catch Throwable t
-          (def ttt t))
+          (deliver read-loop-error t))
         (finally
           (println "Read loop broken"))))
     (let [hello-reply (write-message client hello-call)]

@@ -1,9 +1,10 @@
 (ns repl-sessions.poke
   (:require
-   [lambdaisland.dbus.client :as client]))
+   [lambdaisland.dbus.client :as client]
+   [lambdaisland.dbus.systemd :as systemd]))
 
-(client/init-client! (client/system-sock) (fn [v]
-                                            (prn '-> v)))
+(def client (client/init-client! (client/system-sock) (fn [v]
+                                                        (prn '-> v))))
 
 (let [client (client/init-client! (client/session-sock)
                                   (fn [v]
@@ -71,3 +72,17 @@ client
 
 (client/introspect client {:destination "org.freedesktop.secrets"
                            :path "/org/freedesktop/secrets"})
+
+(def client (client/init-client! (client/system-sock) (fn [v]
+                                                        (prn '-> v))))
+
+@(client/write-message
+  client
+  {:type :method-call
+   :headers
+   {:destination "org.freedesktop.systemd1"
+    :path "/org/freedesktop/systemd1"
+    :interface "org.freedesktop.systemd1.Manager"
+    :member "ListUnits"}})
+
+(systemd/list-units client)
