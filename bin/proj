@@ -1,10 +1,6 @@
 #!/usr/bin/env bb
 
-(ns proj (:require [lioss.main :as lioss]
-                   [lioss.subshell :as subshell]
-                   [clojure.java.io :as io]
-                   [clojure.string :as str]
-                   [lioss.version :as version]))
+(ns proj (:require [lioss.main :as lioss]))
 
 (lioss/main
  {:license          :mpl
