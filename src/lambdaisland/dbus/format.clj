@@ -408,7 +408,8 @@
                        (doseq [elem v]
                          (write-type buf (second t) elem)))))
         :struct
-        #(put-struct buf (rest t) v)
+        (fn [buf v]
+          (put-struct buf (rest t) v))
         :dict-entry
         (fn [buf [k v]]
           (align buf 8)
