@@ -12,9 +12,9 @@
       buf (format/byte-buffer)]
   (client/sock-read (:buffer )))
 
-(def client  (client/init-client! (client/session-sock)
-                                  (fn [v]
-                                    (prn '-> v))))
+(def client (client/init-client! (client/session-sock)
+                                 (fn [v]
+                                   (prn '-> v))))
 
 client
 
@@ -73,16 +73,38 @@ client
 (client/introspect client {:destination "org.freedesktop.secrets"
                            :path "/org/freedesktop/secrets"})
 
-(def client (client/init-client! (client/system-sock) (fn [v]
-                                                        (prn '-> v))))
+(def client (client/init-client! (client/system-sock)))
 
-@(client/write-message
-  client
-  {:type :method-call
-   :headers
-   {:destination "org.freedesktop.systemd1"
-    :path "/org/freedesktop/systemd1"
-    :interface "org.freedesktop.systemd1.Manager"
-    :member "ListUnits"}})
+(doseq [p (map :object-path (systemd/list-units client))]
+  (println "----" p "-----")
+  (clojure.pprint/pprint
+   (poke!
+    {:type :method-call
+     :headers
+     {:path  p
+      :member "GetAll"
+      :interface "org.freedesktop.DBus.Properties"
+      :destination "org.freedesktop.systemd1"
+      :signature "s"}
+     :body
+     "org.freedesktop.systemd1.Unit"})))
 
-(systemd/list-units client)
+(poke!
+ {:type :method-call
+  :headers
+  {:path "/org/freedesktop/DBus"
+   :member "AddMatch"
+   :signature "s"
+   :interface "org.freedesktop.DBus"
+   :destination "org.freedesktop.DBus"}
+  :body
+  "type='signal',path='/org/freedesktop/systemd1/unit/forgejo_2eservice'"
+  #_"type='signal',sender='org.freedesktop.systemd1',interface='org.freedesktop.DBus.Properties',member='PropertiesChanged',path='/org/freedesktop/systemd1/unit/forgejo_2eservice'"})
+;; => {:endian :LITTLE_ENDIAN,
+;;     :type :method-return,
+;;     :flags {:no-reply-expected true},
+;;     :version 1,
+;;     :body-length 0,
+;;     :serial 4,
+;;     :headers
+;;     {:destination ":1.388124", :reply-serial 3, :sender "org.freedesktop.DBus"}}

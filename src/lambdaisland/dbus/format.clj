@@ -79,6 +79,10 @@
           (f buf))
         read-fns))
 
+(defn get-dict-entry [^ByteBuffer buf read-k read-v]
+  (align buf 8)
+  [(read-k buf) (read-v buf)])
+
 (defn get-string [^ByteBuffer buf]
   (align buf 4)
   (let [len (get-uint32 buf)
@@ -165,7 +169,8 @@
    {:id :uint64 :sig \t :read get-uint64 :write put-uint64}
    {:id :array :sig \a}
    {:id :variant :sig \v}
-   {:id :struct :sig \( :sig-end\)}])
+   {:id :struct :sig \( :sig-end\)}
+   {:id :dict-entry :sig \{ :sig-end\}}])
 
 (def message-types
   [:invalid :method-call :method-return :error :signal])
@@ -196,6 +201,8 @@
       (str "a" (type->sig (second t)))
       :struct
       (str "(" (apply str (map type->sig (rest t))) ")")
+      :dict-entry
+      (str "{" (type->sig (nth t 1)) (type->sig (nth t 2)) ")")
       :variant
       "v")
     (str (type->sig* t))))
@@ -218,6 +225,10 @@
           (read-struct-sig rdr)
           \)
           :close-struct
+          \{
+          (let [t [:dict-entry (read-sig rdr) (read-sig rdr)]]
+            (assert (= \} (char (.read rdr))))
+            t)
           \a
           [:array (read-sig rdr)]
           (sig->type* ch))))))
@@ -265,10 +276,17 @@
                  (read-type buf t))))
            :array
            (fn [buf]
-             (get-array buf #(read-type % (second t))))
+             (let [arr (get-array buf #(read-type % (second t)))]
+               (if (and (vector? (second t))
+                        (= :dict-entry (first (second t))))
+                 (into {} arr)
+                 arr)))
            :struct
            (fn [buf]
-             (get-struct buf (map (fn [t] #(read-type % t)) (rest t)))))
+             (get-struct buf (map (fn [t] #(read-type % t)) (rest t))))
+           :dict-entry
+           (fn [buf]
+             (get-dict-entry buf #(read-type % (nth t 1)) #(read-type % (nth t 2)))))
 
          (= t :variant)
          (fn [buf]
@@ -360,6 +378,12 @@
     :string
     (vector? v)
     (into [:struct] (map derive-type) v)
+    (map? v)
+    (let [kts (map derive-type (keys v))
+          vts (map derive-type (vals v))
+          kt (if (and (seq kts) (apply = kts)) (first kts) :variant)
+          vt (if (and (seq vts) (apply = vts)) (first vts) :variant)]
+      [:array [:dict-entry kt vt]])
     :else
     (throw (ex-info "Can't derive type" {:v v}))))
 
@@ -385,6 +409,11 @@
                          (write-type buf (second t) elem)))))
         :struct
         #(put-struct buf (rest t) v)
+        :dict-entry
+        (fn [buf [k v]]
+          (align buf 8)
+          (write-type buf (nth t 1) k)
+          (write-type buf (nth t 2) v))
         :variant
         (fn [buf v]
           (put-signature buf (type->sig (second t)))
@@ -463,3 +492,14 @@
       (.flip b)
       (.get b arr 0 len)
       (String. arr StandardCharsets/UTF_8))))
+
+(comment
+
+  (let [v {"foo" 123 "bar" "x"}
+        t (derive-type v)
+        b (byte-buffer)]
+    (write-type b t v)
+    (.flip b)
+    (read-type b t)
+    )
+  )

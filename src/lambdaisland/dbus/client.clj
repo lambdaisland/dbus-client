@@ -184,6 +184,7 @@
             (when handler
               (handler msg))))
         (catch Throwable t
+          (println "ERR" t)
           (deliver read-loop-error t))
         (finally
           (println "Read loop broken"))))
