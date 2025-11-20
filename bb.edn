@@ -1,5 +1,6 @@
 {:paths ["src"]
  :deps {com.lambdaisland/launchpad {:mvn/version "0.45.201-alpha"}
-        lambdaisland/open-source {:git/url "https://github.com/lambdaisland/open-source"
-                                  :git/sha "f1f006edc1d562a8f8632ee59a516625b61a1df7"}
+        lambdaisland/open-source {:local/root "/home/arne/lambdaisland/open-source/"}
+        #_{:git/url "https://github.com/lambdaisland/open-source"
+           :git/sha "f1f006edc1d562a8f8632ee59a516625b61a1df7"}
         com.lambdaisland/cli {:mvn/version "1.27.121"}}}
