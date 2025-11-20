@@ -1,3 +1,11 @@
+# Unreleased
+
+## Added
+
+## Fixed
+
+## Changed
+
 # 0.2.15 (2025-11-20 / 5438609)
 
 ## Added

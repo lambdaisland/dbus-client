@@ -3,7 +3,7 @@
   <modelVersion>4.0.0</modelVersion>
   <groupId>com.lambdaisland</groupId>
   <artifactId>dbus-client</artifactId>
-  <version>0.1.11</version>
+  <version>0.2.15</version>
   <name>dbus-client</name>
   <description>Pure-clojure DBUS client</description>
   <url>https://github.com/lambdaisland/dbus-client</url>
@@ -25,13 +25,18 @@
     <url>https://github.com/lambdaisland/dbus-client</url>
     <connection>scm:git:git://github.com/lambdaisland/dbus-client.git</connection>
     <developerConnection>scm:git:ssh://git@github.com/lambdaisland/dbus-client.git</developerConnection>
-    <tag>9f176cdbb2b0fbafed1d6853b541762742d86b8b</tag>
+    <tag>bac2fe736df88cc4881da095b489c3e33104f077</tag>
   </scm>
   <dependencies>
     <dependency>
       <groupId>org.clojure</groupId>
       <artifactId>clojure</artifactId>
       <version>1.12.3</version>
+    </dependency>
+    <dependency>
+      <groupId>com.lambdaisland</groupId>
+      <artifactId>cli</artifactId>
+      <version>1.27.121</version>
     </dependency>
     <dependency>
       <groupId>org.clojure</groupId>
@@ -41,7 +46,7 @@
     <dependency>
       <groupId>org.clojure</groupId>
       <artifactId>data.xml</artifactId>
-      <version>0.2.0-alpha9</version>
+      <version>0.0.8</version>
     </dependency>
   </dependencies>
   <build>
@@ -71,7 +76,7 @@
         <configuration>
           <archive>
             <manifestEntries>
-              <git-revision>9f176cdbb2b0fbafed1d6853b541762742d86b8b</git-revision>
+              <git-revision>bac2fe736df88cc4881da095b489c3e33104f077</git-revision>
             </manifestEntries>
           </archive>
         </configuration>
