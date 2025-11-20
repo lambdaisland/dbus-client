@@ -313,7 +313,9 @@
     :BIG_ENDIAN    ByteOrder/BIG_ENDIAN))
 
 (defn read-message-header [^ByteBuffer buf]
-  (let [endian (case (char (.get buf))
+  (let [endian-char  (char (.get buf))
+        _ (when-not (#{\l \B} endian-char) (println "BAD ENDIAN" endian-char))
+        endian (case endian-char
                  \l :LITTLE_ENDIAN
                  \B :BIG_ENDIAN)
         _ (.order buf (byte-order endian))

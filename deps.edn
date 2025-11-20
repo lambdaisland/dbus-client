@@ -2,6 +2,7 @@
 
  :deps
  {org.clojure/clojure {:mvn/version "1.12.3"}
+  com.lambdaisland/cli {:mvn/version "0.24.97"}
   org.clojure/test.check {:mvn/version "1.1.1"}
   org.clojure/data.xml {:mvn/version "0.2.0-alpha9"}}
 

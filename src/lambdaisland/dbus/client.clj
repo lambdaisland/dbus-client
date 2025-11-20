@@ -153,30 +153,38 @@
                   data-cmd
                   negotiate-unix-fd
                   begin-cmd))
-  (let [buf (format/byte-buffer)
-        read-buf (format/byte-buffer)
-        serial (AtomicInteger. 0)
-        replies (atom {})
+  (let [buf             (format/byte-buffer)
+        read-buf        (format/byte-buffer)
+        serial          (AtomicInteger. 0)
+        replies         (atom {})
         read-loop-error (promise)
-        id (loop [[line & lines] (read-handshake-lines chan buf)]
-             (println line)
-             (if-let [[_ id] (re-find #"OK ([0-9a-f]*)\r\n" line)]
-               id
-               (recur lines)))
-        client {:socket chan
-                :buffer buf
-                :read-buf read-buf
-                :id id
-                :replies replies
-                :serial serial
-                :handler handler
-                :read-loop-error read-loop-error}]
+        id              (loop [[line & lines] (read-handshake-lines chan buf)]
+                          (if-let [[_ id] (re-find #"OK ([0-9a-f]*)\r\n" line)]
+                            id
+                            (recur lines)))
+        client          {:socket          chan
+                         :buffer          buf
+                         :read-buf        read-buf
+                         :id              id
+                         :replies         replies
+                         :serial          serial
+                         :handler         handler
+                         :read-loop-error read-loop-error}]
     (future
       (try
         (while true
           (.clear read-buf)
           (.read chan read-buf)
-          (.flip read-buf)
+          (if false ;; set to true to print detailed what goes over the wire
+            (let [len       (.position read-buf)
+                  arr       (byte-array len)
+                  _         (.flip read-buf)
+                  start-pos (.position read-buf)]
+              (.get read-buf arr 0 len)
+              (println (pr-str (str/replace (String. arr StandardCharsets/UTF_8) #"\n" "\\n")))
+              (.position read-buf (long start-pos)))
+            (.flip read-buf))
+
           (let [msg (read-message client)]
             (when-let [reply (get @replies (get-in msg [:headers :reply-serial]))]
               (swap! replies dissoc (:serial msg))

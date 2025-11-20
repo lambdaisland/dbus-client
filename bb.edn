@@ -1,4 +1,5 @@
-{:deps {com.lambdaisland/launchpad {:mvn/version "0.45.201-alpha"}
+{:paths ["src"]
+ :deps {com.lambdaisland/launchpad {:mvn/version "0.45.201-alpha"}
         lambdaisland/open-source {:git/url "https://github.com/lambdaisland/open-source"
                                   :git/sha "e919f0defcc3bfdad61af5da494c07d179e0733f"}
         com.lambdaisland/cli {:mvn/version "0.24.97"}}}
