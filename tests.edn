@@ -1,2 +1,3 @@
 #kaocha/v1
-{:plugins [:notifier :print-invocations :profiling]}
+{:tests [{:ns-patterns [".*"]}]
+ :plugins [#_:notifier :print-invocations :profiling]}

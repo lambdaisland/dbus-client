@@ -1,4 +1,5 @@
 (ns lambdaisland.dbus.client
+  "Pure-Clojure DBUS client library"
   (:require
    [clojure.data.xml :as xml]
    [clojure.string :as str]

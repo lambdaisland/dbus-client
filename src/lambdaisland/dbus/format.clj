@@ -332,7 +332,7 @@
         len  (get-uint32 buf)
         serial  (get-uint32 buf)
         headers (into {} (get-array buf read-header))
-        sig (get headers :signature)]
+        #_#_sig (get headers :signature)]
     (align buf 8)
     {:endian endian
      :type msg-type
@@ -346,10 +346,10 @@
   (read-type buffer (sig->type sig)))
 
 (defn read-message [^ByteBuffer buf]
-  (let [msg (read-message-header buf)
-        {:keys [sig]} msg]
-    (if sig
-      (assoc msg :body (read-body buf sig))
+  (let [{:keys [headers] :as msg} (read-message-header buf)
+        {:keys [signature]} headers]
+    (if signature
+      (assoc msg :body (read-body buf signature))
       msg)))
 
 (defn show-buffer-lim [^ByteBuffer b]

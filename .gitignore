@@ -13,3 +13,4 @@ resources/public/ui
 out
 .#*
 repl_sessions/mcp_repl_log.clj
+*.local.*
