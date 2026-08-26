@@ -118,7 +118,8 @@
     (and (= :method-call type)
          (not (:no-reply-expected flags))
          (not (get-in @interfaces
-                      [destination path interface member
+                      [destination path interface
+                       :methods member
                        :annotations "org.freedesktop.DBus.Method.NoReply"])))))
 
 (defn write-message [{:keys [^SocketChannel socket ^ByteBuffer buffer serial replies] :as client} msg]
@@ -153,15 +154,23 @@
          :destination dest}}
        (merge-with (fn [a b] (if (map? a) (merge a b) b)) (dissoc m :method :dest :path))))))
 
-(defn method-sig [client headers]
+(defn method-signature [client headers]
   (apply str (map :type (:in (method-info client headers)))))
 
+(defn- single-type? [sig]
+  (let [t (format/sig->type sig)]
+    (not (and (vector? t) (= :tuple (first t))))))
+
 (defn call [client method-call]
-  (let [msg (expand-method-call method-call)
-        msg (if (and (seq (:body msg))
-                     (not (-> msg :headers :signature)))
-              (assoc-in msg [:headers :signature] (method-sig client (:headers msg)))
-              msg)]
+  (let [msg  (expand-method-call method-call)
+        body (:body msg)
+        sig  (when (seq body)
+               (or (get-in msg [:headers :signature])
+                   (method-signature client (:headers msg))))
+        msg  (cond-> msg
+               sig (assoc-in [:headers :signature] sig)
+               (and sig (= 1 (count body)) (single-type? sig))
+               (assoc :body (first body)))]
     (msg/body (write-message client msg))))
 
 (defn read-fully
@@ -243,25 +252,24 @@
                          :interfaces      interfaces}]
     (future
       (try
-        (while true
+        (loop []
           (.clear read-buf)
-          (.read chan read-buf)
-          (if false ;; set to true to print detailed what goes over the wire
-            (let [len       (.position read-buf)
-                  arr       (byte-array len)
-                  _         (.flip read-buf)
-                  start-pos (.position read-buf)]
-              (.get read-buf arr 0 len)
-              (println (pr-str (str/replace (String. arr StandardCharsets/UTF_8) #"\n" "\\n")))
-              (.position read-buf (long start-pos)))
-            (.flip read-buf))
-          (let [{:keys [type headers] :as msg}    (read-message client)
-                {:keys [reply-serial error-name]} headers]
-            (when-let [reply (get @replies reply-serial)]
-              (swap! replies dissoc reply-serial)
-              (deliver reply msg))
-            (when handler
-              (.execute executor #(handler msg)))))
+          (let [len (.read chan read-buf)]
+            (when (pos? len)
+              (if false ;; set to true to print detailed what goes over the wire
+                (let [arr (byte-array len)
+                      _   (.flip read-buf)]
+                  (.get read-buf arr 0 len)
+                  (println (pr-str (str/replace (String. arr StandardCharsets/UTF_8) #"\n" "\\n"))))
+                (.flip read-buf))
+              (let [{:keys [type headers] :as msg}    (read-message client)
+                    {:keys [reply-serial error-name]} headers]
+                (when-let [reply (get @replies reply-serial)]
+                  (swap! replies dissoc reply-serial)
+                  (deliver reply msg))
+                (when handler
+                  (.execute executor #(handler msg))))
+              (recur))))
         (catch Throwable t
           (println "ERR" t)
           (deliver read-loop-error t))
@@ -290,20 +298,26 @@
               (update-vals
                (reduce
                 (fn [acc {:keys [tag attrs content]}]
-                  (update acc (case tag :property :properties :method :methods :signal :signals)
-                          (fnil conj [])
-                          (:name attrs)
-                          (reduce
-                           (fn [acc {:keys [tag attrs]}]
-                             (case tag
-                               :arg
-                               (if-let [d (:direction attrs)]
-                                 (update acc (keyword d) (fnil conj []) (dissoc attrs :direction))
-                                 (update acc :args (fnil conj []) (dissoc attrs :direction)))
-                               :annotation
-                               (assoc-in acc [:annotations (:name attrs)] (:value attrs))))
-                           {}
-                           content)))
+                  (if-not tag
+                    acc
+                    (update acc (case tag
+                                  :property :properties
+                                  :method :methods
+                                  :signal :signals
+                                  tag)
+                            (fnil conj [])
+                            (:name attrs)
+                            (reduce
+                             (fn [acc {:keys [tag attrs]}]
+                               (case tag
+                                 :arg
+                                 (if-let [d (:direction attrs)]
+                                   (update acc (keyword d) (fnil conj []) (dissoc attrs :direction))
+                                   (update acc :args (fnil conj []) (dissoc attrs :direction)))
+                                 :annotation
+                                 (assoc-in acc [:annotations (:name attrs)] (:value attrs))))
+                             {}
+                             content))))
                 {}
                 content)
                #(apply array-map %))])))

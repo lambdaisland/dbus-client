@@ -243,24 +243,45 @@
           1 (first ts)
           (into [:tuple] ts))))))
 
-(defn get-array [^ByteBuffer buf read-fn]
+(defn alignment
+  "Byte-alignment required by a D-Bus type. STRUCT and DICT_ENTRY are always
+  8-byte aligned; ARRAY aligns its 4-byte length; primitives align to their
+  natural size; SIGNATURE, BYTE and VARIANT are 1-byte aligned."
+  [t]
+  (cond
+    (vector? t)
+    (case (first t)
+      (:struct :dict-entry) 8
+      :array 4
+      1)
+
+    (contains? #{:int64 :uint64 :double} t) 8
+    (contains? #{:int32 :uint32 :bool :string :object-path} t) 4
+    (contains? #{:int16 :uint16} t) 2
+
+    :else 1))
+
+(defn get-array [^ByteBuffer buf elem-alignment read-fn]
   (align buf 4)
   (let [len (get-uint32 buf)
+        _ (align buf elem-alignment)
         end (+ (.position buf) len)]
     (loop [res []]
       (if (< (.position buf) end)
         (recur (conj res (read-fn buf)))
         res))))
 
-(defn put-array [^ByteBuffer buf write-elements-fn]
+(defn put-array [^ByteBuffer buf elem-alignment write-elements-fn]
   (align buf 4)
   (let [size-pos (.position buf)]
     (.putInt buf 0)
-    (write-elements-fn buf)
-    (let [end-pos (.position buf)]
-      (.position buf size-pos)
-      (.putInt buf (- end-pos size-pos 4))
-      (.position buf end-pos)))
+    (align buf elem-alignment)
+    (let [elem-start (.position buf)]
+      (write-elements-fn buf)
+      (let [end-pos (.position buf)]
+        (.position buf size-pos)
+        (.putInt buf (- end-pos elem-start))
+        (.position buf end-pos))))
   buf)
 
 (defn read-type [buf t]
@@ -276,7 +297,7 @@
                  (read-type buf t))))
            :array
            (fn [buf]
-             (let [arr (get-array buf #(read-type % (second t)))]
+             (let [arr (get-array buf (alignment (second t)) #(read-type % (second t)))]
                (if (and (vector? (second t))
                         (= :dict-entry (first (second t))))
                  (into {} arr)
@@ -331,7 +352,7 @@
         version (get-byte buf)
         len  (get-uint32 buf)
         serial  (get-uint32 buf)
-        headers (into {} (get-array buf read-header))
+        headers (into {} (get-array buf 8 read-header))
         #_#_sig (get headers :signature)]
     (align buf 8)
     {:endian endian
@@ -382,6 +403,8 @@
     :string
     (vector? v)
     (into [:struct] (map derive-type) v)
+    (sequential? v)
+    [:array (derive-type (first v))]
     (map? v)
     (let [kts (map derive-type (keys v))
           vts (map derive-type (vals v))
@@ -407,7 +430,7 @@
              (map (partial write-type buf) (rest t) vs))))
         :array
         (fn [buf v]
-          (put-array buf
+          (put-array buf (alignment (second t))
                      (fn [buf]
                        (doseq [elem v]
                          (write-type buf (second t) elem)))))
@@ -473,7 +496,7 @@
     (put-uint32 buf 0) ;;body length placeholder
     (put-uint32 buf serial)
 
-    (put-array buf #(write-headers % headers))
+    (put-array buf 8 #(write-headers % headers))
     (align buf 8)
     (let [body-start-pos (.position buf)]
       (when-let [sig (get headers :signature)]

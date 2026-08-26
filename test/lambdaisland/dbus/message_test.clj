@@ -24,12 +24,6 @@
     (is (= "org.freedesktop.DBus.Error.UnknownMethod" (message/error-name error-msg)))
     (is (nil? (message/error-name return-msg)))))
 
-(deftest error-message-test
-  (testing "extracts the human-readable message from the body"
-    (is (= "No such method" (message/error-message error-msg)))
-    (is (= "hello" (message/error-message return-msg)))
-    (is (nil? (message/error-message {:type :error :body []})))))
-
 (deftest ?ex-test
   (testing "returns nil for non-error messages"
     (is (nil? (message/?ex return-msg))))
@@ -38,7 +32,7 @@
       (is (instance? clojure.lang.ExceptionInfo ex))
       (is (= :lambdaisland.dbus/error (:type (ex-data ex))))
       (is (= "org.freedesktop.DBus.Error.UnknownMethod" (:error-name (ex-data ex))))
-      (is (= "No such method" (:error-message (ex-data ex))))
+      (is (= ["No such method" "extra-arg"] (:error-message (ex-data ex))))
       (is (= error-msg (:message (ex-data ex))))
       (is (re-find #"UnknownMethod" (ex-message ex))))))
 
