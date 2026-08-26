@@ -371,7 +371,9 @@
     (float? v)
     :double
     (int? v)
-    :int64
+    (if (<= Integer/MIN_VALUE v Integer/MAX_VALUE)
+      :int32
+      :int64)
     (or (instance? BigInt v) (instance? BigInteger v))
     (if (< v 0)
       :int64
