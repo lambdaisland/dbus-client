@@ -11,7 +11,8 @@
    (java.nio ByteBuffer)
    (java.nio.channels SocketChannel)
    (java.nio.charset StandardCharsets)
-   (java.util.concurrent.atomic AtomicInteger)))
+   (java.util.concurrent.atomic AtomicInteger)
+   java.util.concurrent.Executors))
 
 (set! *warn-on-reflection* true)
 
@@ -89,10 +90,11 @@
         (byte-array 0)))))
 
 (defn write-message* [{:keys [^SocketChannel socket ^ByteBuffer buffer serial replies] :as client} msg]
-  (.clear buffer)
-  (format/write-message buffer msg)
-  (.flip buffer)
-  (.write socket buffer)
+  (locking buffer
+    (.clear buffer)
+    (format/write-message buffer msg)
+    (.flip buffer)
+    (.write socket buffer))
   nil)
 
 (declare introspect)
@@ -111,15 +113,13 @@
 (defn method-info [client {:keys [destination path interface member] :as headers}]
   (get-in (path-info client headers) [interface :methods member]))
 
-(defn reply-expected? [client msg]
-  (or
-   ;; prevent recursive calls
-   (and (= "org.freedesktop.DBus.Introspectable" (:interface (:headers msg)))
-        (= "Introspect" (:member (:headers msg))))
-   (and (= :method-call (:type msg))
-        (not (:no-reply-expected (:flags msg)))
-        (not (get-in (method-info client (:headers msg))
-                     [:annotations "org.freedesktop.DBus.Method.NoReply"])))))
+(defn reply-expected? [{:keys [interfaces]} {:keys [flags type headers] :as msg}]
+  (let [{:keys [destination path interface member]} headers]
+    (and (= :method-call type)
+         (not (:no-reply-expected flags))
+         (not (get-in @interfaces
+                      [destination path interface member
+                       :annotations "org.freedesktop.DBus.Method.NoReply"])))))
 
 (defn write-message [{:keys [^SocketChannel socket ^ByteBuffer buffer serial replies] :as client} msg]
   (let [serial (.incrementAndGet ^AtomicInteger serial)
@@ -231,6 +231,7 @@
                           (if-let [[_ id] (re-find #"OK ([0-9a-f]*)\r\n" line)]
                             id
                             (recur lines)))
+        executor        (Executors/newSingleThreadExecutor)
         client          {:socket          chan
                          :buffer          buf
                          :read-buf        read-buf
@@ -254,14 +255,13 @@
               (println (pr-str (str/replace (String. arr StandardCharsets/UTF_8) #"\n" "\\n")))
               (.position read-buf (long start-pos)))
             (.flip read-buf))
-
           (let [{:keys [type headers] :as msg}    (read-message client)
                 {:keys [reply-serial error-name]} headers]
             (when-let [reply (get @replies reply-serial)]
               (swap! replies dissoc reply-serial)
               (deliver reply msg))
             (when handler
-              (handler msg))))
+              (.execute executor #(handler msg)))))
         (catch Throwable t
           (println "ERR" t)
           (deliver read-loop-error t))
@@ -279,24 +279,6 @@
 
 (defn system-sock []
   (sock-conn "/run/dbus/system_bus_socket"))
-
-(defn munge-interfaces [{:keys [attrs content]}]
-  (into
-   {}
-   (keep (fn [{:keys [tag attrs content]}]
-           (when (= :interface tag)
-             [(:name attrs)
-              (into {}
-                    (keep (fn [{:keys [tag attrs content]}]
-                            (when (= :method tag)
-                              [(:name attrs)
-                               (->> content
-                                    (filter #(and (= :arg (:tag %))
-                                                  (= "in" (:direction (:attrs %)))))
-                                    (map (comp :type :attrs))
-                                    (apply str))])))
-                    content)])))
-   content))
 
 (defn munge-introspection
   [{:keys [attrs content]}]
@@ -353,6 +335,6 @@
    (-> client (introspect* destination path) munge-introspection)))
 
 (defn ls [client destination path]
-  (map #(str path "/" (:name (:attrs %)))
+  (map #(str path (if (= "/" path) "" "/") (:name (:attrs %)))
        (filter #(= :node (:tag %))
                (:content (introspect* client destination path)))))

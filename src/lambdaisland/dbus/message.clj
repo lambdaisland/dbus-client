@@ -7,15 +7,12 @@
 (defn error-name [msg]
   (get-in msg [:headers :error-name]))
 
-(defn error-message [msg]
-  (first (:body msg)))
-
 (defn ?ex [msg]
   (when (error? msg)
     (ex-info (str "D-Bus error: " (error-name msg))
              {:type :lambdaisland.dbus/error
               :error-name (error-name msg)
-              :error-message (error-message msg)
+              :error-message (:body msg)
               :message msg})))
 
 (defn ?throw [msg]
