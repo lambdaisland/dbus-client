@@ -92,3 +92,26 @@
     (is (= [] (format/read-type (bytes->buf [0 0 0 0 0 0 0 0]) [:array [:struct :string :variant]])))
     (is (= [["Description" "hello"]]
            (format/read-type (bytes->buf captured-array-bytes) [:array [:struct :string :variant]])))))
+
+(deftest message-at-non-zero-offset-test
+  (testing "a message starting at a non-8-aligned offset parses when *buffer-offset* is bound"
+    (let [buf (format/byte-buffer)
+          _   (format/write-message buf {:type :method-return
+                                         :serial 42
+                                         :headers {:signature "s" :reply-serial 7}
+                                         :body "hello"})
+          _   (.flip buf)
+          msg-bytes (let [arr (byte-array (.remaining buf))]
+                      (.get buf arr)
+                      arr)
+          offset 6
+          buf2 (doto (format/byte-buffer)
+                 (.position offset)
+                 (.put msg-bytes)
+                 (.flip))]
+      (.position buf2 offset)
+      (let [read (binding [format/*buffer-offset* offset]
+                   (format/read-message buf2))]
+        (is (= "hello" (:body read)))
+        (is (= 7 (get-in read [:headers :reply-serial])))
+        (is (= :method-return (:type read)))))))

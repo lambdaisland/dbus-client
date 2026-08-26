@@ -1,7 +1,8 @@
 (ns lambdaisland.dbus.bus
   "Convenience functions for the message bus interface (org.freedesktop.DBus)."
   (:require
-   [lambdaisland.dbus.client :as client]))
+   [lambdaisland.dbus.client :as client]
+   [clojure.string :as str]))
 
 (defn dbus-call
   "Call a method on the org.freedesktop.DBus interface."
@@ -40,7 +41,12 @@
   (dbus-call client 'org.freedesktop.DBus/GetConnectionUnixProcessID name))
 
 (defn add-match [client rule]
-  (dbus-call client 'org.freedesktop.DBus/AddMatch rule))
+  (dbus-call client 'org.freedesktop.DBus/AddMatch
+             (if (map? rule)
+               (str/join "," (map (fn [[k v]]
+                                    (str (name k) "='" v "'"))
+                                  rule))
+               rule)))
 
 (defn remove-match [client rule]
   (dbus-call client 'org.freedesktop.DBus/RemoveMatch rule))

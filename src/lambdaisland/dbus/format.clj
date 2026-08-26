@@ -293,8 +293,7 @@
            (if (= 1 (count t))
              (constantly nil)
              (fn [buf]
-               (for [t (rest t)]
-                 (read-type buf t))))
+               (mapv (fn [t] (read-type buf t)) (rest t))))
            :array
            (fn [buf]
              (let [arr (get-array buf (alignment (second t)) #(read-type % (second t)))]

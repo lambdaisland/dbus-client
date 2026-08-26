@@ -191,21 +191,21 @@
         (recur (+ total-read bytes-read))))))
 
 (defn ensure-full-read
-  "Ensures the ByteBuffer contains at least 'body-len' bytes starting from its current position.
-  Reads more data from the channel if needed, re-allocating the buffer if required. "
-  [^SocketChannel chan ^ByteBuffer buf body-len]
+  "Ensures the ByteBuffer contains at least `n` bytes starting from its current
+  position. Reads more data from the channel if needed, re-allocating the buffer
+  if required. Returns a buffer positioned at the same logical offset, with at
+  least `n` bytes available."
+  [^SocketChannel chan ^ByteBuffer buf n]
   (let [available-bytes (- (.limit buf) (.position buf))]
-    (if (<= body-len available-bytes)
+    (if (<= n available-bytes)
       buf
-      ;; Not enough bytes available to read the whole body. We need to read
-      ;; more.
-      (let [^ByteBuffer new-buf (doto (format/byte-buffer body-len)
-                                  (.order (.order buf)))
-            initial-position (.position buf)
-            bytes-to-read-from-channel (- body-len available-bytes)]
+      (let [needed (- n available-bytes)
+            ^ByteBuffer new-buf (doto (format/byte-buffer (max n format/*default-buffer-size*))
+                                  (.order (.order buf)))]
         (.put new-buf (.slice buf))
-        (let [total-read (read-fully chan new-buf)]
-          (assert (<= bytes-to-read-from-channel total-read)))
+        (let [^ByteBuffer tmp (format/byte-buffer needed)]
+          (read-fully chan tmp)
+          (.put new-buf (.flip tmp)))
         (.flip new-buf)
         new-buf))))
 
@@ -216,13 +216,58 @@
                            ba)
                   StandardCharsets/UTF_8)))
 
-(defn read-message [{:keys [^ByteBuffer read-buf ^SocketChannel socket]}]
-  (let [{:keys [headers body-length] :as msg} (format/read-message-header read-buf)
-        sig (:signature headers)]
-    (if (and sig (< 0 body-length))
-      (let [buffer (ensure-full-read socket read-buf body-length)]
-        (assoc msg :body (format/read-body buffer sig)))
-      msg)))
+(defn- message-total-length
+  "Given a buffer positioned at the start of a message (with at least 16 bytes
+  available), return the total on-wire length of the message: the 8-byte-aligned
+  header plus the body. Messages are not themselves padded to 8 bytes, so this
+  is exactly where the next message begins."
+  [^ByteBuffer buf]
+  (let [start (.position buf)
+        header-len (+ 16 (bit-and (.getInt buf (+ start 12)) 0xffffffff))
+        body-len (bit-and (.getInt buf (+ start 4)) 0xffffffff)
+        pad8 (fn [n] (mod (- 8 (mod n 8)) 8))]
+    (+ header-len (pad8 header-len) body-len)))
+
+(defn- read-message*
+  "Read a single message starting at `buf`'s current position, reading more from
+  `socket` as needed. Returns [msg buf] with buf positioned just past the
+  message; buf may be a freshly allocated buffer if the original was too small."
+  [^SocketChannel socket ^ByteBuffer buf]
+  (let [^ByteBuffer buf (ensure-full-read socket buf 16)
+        start (.position buf)
+        _ (.order buf (format/byte-order (case (char (.get buf start))
+                                           \l :LITTLE_ENDIAN
+                                           \B :BIG_ENDIAN)))
+        message-total (message-total-length buf)
+        ^ByteBuffer buf (ensure-full-read socket buf message-total)
+        msg-start (.position buf)]
+    (binding [format/*buffer-offset* msg-start]
+      (let [{:keys [headers body-length] :as msg} (format/read-message-header buf)
+            sig (:signature headers)
+            body (when (and sig (pos? body-length))
+                   (format/read-body buf sig))]
+        (.position buf (int (+ msg-start message-total)))
+        [(cond-> msg body (assoc :body body)) buf]))))
+
+(defn- dispatch! [client msg]
+  (let [{:keys [reply-serial]} (:headers msg)]
+    (when-let [reply (get @(:replies client) reply-serial)]
+      (swap! (:replies client) dissoc reply-serial)
+      (deliver reply msg))
+    (when-let [handler (:handler client)]
+      (.execute ^java.util.concurrent.Executor (:executor client) #(handler msg)))))
+
+(defn- process-messages
+  "Dispatch every complete message currently buffered, leaving buf positioned at
+  the start of any trailing partial message. Returns buf."
+  [client ^ByteBuffer buf]
+  (let [^SocketChannel socket (:socket client)]
+    (loop [^ByteBuffer buf buf]
+      (if (>= (- (.limit buf) (.position buf)) 16)
+        (let [[msg ^ByteBuffer buf] (read-message* socket buf)]
+          (dispatch! client msg)
+          (recur buf))
+        buf))))
 
 (defn init-client! [^SocketChannel chan & [handler]]
   (write-str chan
@@ -248,28 +293,18 @@
                          :replies         replies
                          :serial          serial
                          :handler         handler
+                         :executor        executor
                          :read-loop-error read-loop-error
                          :interfaces      interfaces}]
     (future
       (try
-        (loop []
-          (.clear read-buf)
-          (let [len (.read chan read-buf)]
+        (loop [buf read-buf]
+          (let [len (.read chan buf)]
             (when (pos? len)
-              (if false ;; set to true to print detailed what goes over the wire
-                (let [arr (byte-array len)
-                      _   (.flip read-buf)]
-                  (.get read-buf arr 0 len)
-                  (println (pr-str (str/replace (String. arr StandardCharsets/UTF_8) #"\n" "\\n"))))
-                (.flip read-buf))
-              (let [{:keys [type headers] :as msg}    (read-message client)
-                    {:keys [reply-serial error-name]} headers]
-                (when-let [reply (get @replies reply-serial)]
-                  (swap! replies dissoc reply-serial)
-                  (deliver reply msg))
-                (when handler
-                  (.execute executor #(handler msg))))
-              (recur))))
+              (.flip buf)
+              (let [^ByteBuffer buf (process-messages client buf)]
+                (.compact buf)
+                (recur buf)))))
         (catch Throwable t
           (println "ERR" t)
           (deliver read-loop-error t))
@@ -309,13 +344,15 @@
                             (:name attrs)
                             (reduce
                              (fn [acc {:keys [tag attrs]}]
-                               (case tag
-                                 :arg
-                                 (if-let [d (:direction attrs)]
-                                   (update acc (keyword d) (fnil conj []) (dissoc attrs :direction))
-                                   (update acc :args (fnil conj []) (dissoc attrs :direction)))
-                                 :annotation
-                                 (assoc-in acc [:annotations (:name attrs)] (:value attrs))))
+                               (if-not tag
+                                 acc
+                                 (case tag
+                                   :arg
+                                   (if-let [d (:direction attrs)]
+                                     (update acc (keyword d) (fnil conj []) (dissoc attrs :direction))
+                                     (update acc :args (fnil conj []) (dissoc attrs :direction)))
+                                   :annotation
+                                   (assoc-in acc [:annotations (:name attrs)] (:value attrs)))))
                              {}
                              content))))
                 {}
