@@ -1,13 +1,12 @@
 {:paths ["src" "resources"]
 
  :deps
- {com.lambdaisland/cli {:mvn/version "1.31.133"}
-  org.clojure/data.xml {:mvn/version "0.0.8"}}
+ {org.clojure/data.xml {:mvn/version "0.0.8"}}
 
  :aliases
  {:dev
   {:extra-paths ["dev"]
-   :extra-deps {}}
+   :extra-deps {com.lambdaisland/cli {:mvn/version "1.31.133"}}}
 
   :test
   {:extra-paths ["test"]
