@@ -20,13 +20,13 @@ Pure-clojure DBUS client
 To use the latest release, add the following to your `deps.edn` ([Clojure CLI](https://clojure.org/guides/deps_and_cli))
 
 ```
-com.lambdaisland/dbus-client {:mvn/version "0.2.15"}
+com.lambdaisland/dbus-client {:mvn/version "0.3.26"}
 ```
 
 or add the following to your `project.clj` ([Leiningen](https://leiningen.org/))
 
 ```
-[com.lambdaisland/dbus-client "0.2.15"]
+[com.lambdaisland/dbus-client "0.3.26"]
 ```
 <!-- /installation -->
 
