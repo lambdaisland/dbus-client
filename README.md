@@ -8,6 +8,12 @@ Pure-clojure DBUS client
 
 ## Features
 
+- Connect to D-Bus over unix sockets (session bus, system bus)
+- Separate implementation of D-Bus (un)marshalling, with type encoding, alignment, signature handling, little/big endian
+- Send messages (maps) and receive replies (promise) asynchronously with low level (`write-message`) and high-level (`call`) API
+- D-Bus introspection, automatic lookup and caching of method signature
+- Wrapper namespaces for built-in D-Bus and Systemd interfaces (DBus, Peer, Properties, ObjectManager, Manager)
+
 <!-- installation -->
 ## Installation
 
@@ -26,33 +32,199 @@ or add the following to your `project.clj` ([Leiningen](https://leiningen.org/))
 
 ## Rationale
 
+D-Bus is a widely used Interprocess Communication (IPC) mechanism providing a
+Remote Procedure Call (RPC) interface, which is widely used on Linux both on a
+system level (via the system bus), and by desktop environments and applications
+(via the session bus).
+
+In Clojure it would be natural to consume something like this through its Java
+bindings, but the Java D-Bus library is based on reflection of Java classes and
+methods, which doesn't work with a dynamically types language like Clojure.
+
+At the end of the day it's just data over the wire, something which Clojure is
+quite good at handling, someone just needs to implement (de)serialisation of the
+wire format. This library does that, as well as offering a message processing
+loop, and a number of utility namespaces, to be a bit more "batteries included".
+
 ## Usage
 
+The main namespace is `lambdaisland.dbus.client`. We'll also load the `bus`
+namespace, which contains wrapper for methods provided by the message bus itself.
+
 ```clj
-(require '[lambdaisland.dbus.client :as client])
-
-(def client (client/init-client! (client/session-sock) ;; or (client/system-sock)
-                                 (fn [v]
-                                   ;; response handler, mostly for signal handling, 
-                                   ;; but receives all messages
-                                   (println "Got reply" v))))
-                                   
-
-;; Method calls return a promise with the response
-@(client/write-message
-   client
-   {:type :method-call
-    :headers
-    {:path "/org/freedesktop/DBus"
-     :member "ListNames"
-     :interface "org.freedesktop.DBus"
-     :destination "org.freedesktop.DBus"}})
-;;=>
-{:body ["org.freedesktop.DBus"
-        "org.freedesktop.Notifications"
-        ,,,]}
+(require
+  '[lambdaisland.dbus.bus :as bus]
+  '[lambdaisland.dbus.client :as dbus])
 ```
-  
+
+To get started, connect to a message bus. `system-sock` connects to the default
+location of the system bus (namely: `/run/dbus/system_bus_socket`),
+`session-sock` finds the session bus via the `DBUS_SESSION_BUS_ADDRESS`
+environment variable.
+
+```clj
+(def client
+  (dbus/init-client!
+   (client/session-sock) ;; or (client/system-sock)
+   (fn [v]
+     ;; response handler, mostly for signal handling,
+     ;; but receives all sent to us
+     (println "Got reply" v))))
+```
+
+With a `client` in hand, we can send a message. A D-Bus messages takes a
+"destination" (an identifier of another peer connected to the bus), a "path",
+identifying a specific service endpoint or object inside the peer, and an
+interface+message name available at that endpoint.
+
+Let's first see who's connected to the bus:
+
+```clj
+(bus/list-names client)
+;;=>
+["org.freedesktop.DBus"
+ "org.freedesktop.Notifications"
+ "org.freedesktop.network-manager-applet"
+ "org.freedesktop.portal.Desktop"
+ "org.freedesktop.systemd1"
+ "org.pipewire.Telephony"
+ "org.gtk.vfs.Daemon"
+ "org.pulseaudio.Server"
+ "org.kde.kdeconnect"
+ "org.gnome.keyring"
+ ,,,
+ ]
+```
+
+Notifications sounds intesting, which paths are available there?
+
+```clj
+(dbus/ls client "org.freedesktop.Notifications" "/")
+;; => ("/org")
+(dbus/ls client "org.freedesktop.Notifications" "/org")
+;; => ("/org/erikreider" "/org/freedesktop")
+(dbus/ls client "org.freedesktop.Notifications" "/org/freedesktop")
+;; => ("/org/freedesktop/Notifications")
+```
+
+And which interfaces and methods can we call there?
+
+```clj
+(dbus/path-info client {:destination "org.freedesktop.Notifications"
+                        :path "/org/freedesktop/Notifications"})
+;;=>
+{"org.freedesktop.DBus.Properties" {,,,}
+ "org.freedesktop.DBus.Introspectable" {,,,}
+ "org.freedesktop.DBus.Peer" {,,,}
+ "org.freedesktop.Notifications"
+ {:methods
+  {"GetCapabilities" {:out [{:type "as", :name "result"}]},
+   "Notify"
+   {:in
+    [{:type "s", :name "app_name"}
+     {:type "u", :name "replaces_id"}
+     {:type "s", :name "app_icon"}
+     {:type "s", :name "summary"}
+     {:type "s", :name "body"}
+     {:type "as", :name "actions"}
+     {:type "a{sv}", :name "hints"}
+     {:type "i", :name "expire_timeout"}],
+    :out [{:type "u", :name "result"}]},
+   "CloseNotification" {:in [{:type "u", :name "id"}]},
+   "GetServerInformation"
+   {:out
+    [{:type "s", :name "name"}
+     {:type "s", :name "vendor"}
+     {:type "s", :name "version"}
+     {:type "s", :name "spec_version"}]}},
+  :signals
+  {"NotificationClosed"
+   {:args [{:type "u", :name "id"} {:type "u", :name "reason"}]},
+   "ActionInvoked"
+   {:args [{:type "u", :name "id"} {:type "s", :name "action_key"}]},
+   "ActivationToken"
+   {:args [{:type "u", :name "id"} {:type "s", :name "activation_token"}]},
+   "NotificationReplied"
+   {:args [{:type "u", :name "id"} {:type "s", :name "text"}]}}}}
+```
+
+Seems it implements a number of common standard interfaces (Properties,
+Introspectable, Peer), but it also has a `org.freedesktop.Notifications`
+interface, with methods like `Notify` and `CloseNotification`. Let's try to
+create a desktop notification!
+
+```clj
+(dbus/call client
+           ['org.freedesktop.Notifications/Notify
+            "org.freedesktop.Notifications"
+            "/org/freedesktop/Notifications"
+            "App name"
+            0              ; replaces_id
+            ""             ; app_icon
+            "Cool summary"
+            "Hello from Clojure!"
+            []             ; actions
+            []             ; hints
+            10000])        ; timeout
+;; => 127
+```
+
+That worked!
+
+The vector passed to `call` is conceived similar to a method call, the first
+element is a namespaced symbol (keyword works too) of `interface/method`,
+followed by destination, path, and any body arguments.
+
+`call` will block until a response arrives. Instead of a vector, it will also
+accept a map:
+
+```clj
+{:method 'interface/method
+ :dest "my.dest"
+ :path "/my/path"
+ :body [body args]}
+```
+
+### Signals
+
+To receive signals, subscribe to them with `bus/add-match`
+
+```clj
+(bus/add-match client
+               {:type      "signal"
+                :sender    "org.freedesktop.Notifications"
+                :interface "org.freedesktop.Notifications"
+                :member    "NotificationClosed"
+                :path      "/org/freedesktop/Notifications"})
+```
+
+Now when the user closes a notification, the callback passed to `init-client!`
+will be called with the following:
+
+```clj
+{:endian :LITTLE_ENDIAN,
+ :type :signal,
+ :flags {:no-reply-expected true},
+ :version 1,
+ :body-length 8,
+ :serial 920404,
+ :headers
+ {:path "/org/freedesktop/Notifications",
+  :interface "org.freedesktop.Notifications",
+  :signature "uu",
+  :member "NotificationClosed",
+  :sender ":1.54"},
+ :body [134 2]}
+```
+
+Which is the raw message map that we got from the message bus.
+
+From the introspection result earlier we know how to interpret the body, namely as `[id reason]`
+
+```clj
+{:signals {"NotificationClosed" {:args [{:type "u", :name "id"} {:type "u", :name "reason"}]}}
+```
+
 <!-- opencollective -->
 ## Lambda Island Open Source
 
@@ -87,7 +259,7 @@ You can find an overview of all our different projects at [lambdaisland/open-sou
 We warmly welcome patches to dbus-client. Please keep in mind the following:
 
 - adhere to the [LambdaIsland Clojure Style Guide](https://nextjournal.com/lambdaisland/clojure-style-guide)
-- write patches that solve a problem 
+- write patches that solve a problem
 - start by stating the problem, then supply a minimal solution `*`
 - by contributing you agree to license your contributions as MPL 2.0
 - don't break the contract with downstream consumers `**`
@@ -112,7 +284,7 @@ line with the project's goals.
 <!-- license -->
 ## License
 
-Copyright &copy; 2025 Arne Brasseur and Contributors
+Copyright &copy; 2025-2026 Arne Brasseur and Contributors
 
 Licensed under the term of the Mozilla Public License 2.0, see LICENSE.
 <!-- /license -->
