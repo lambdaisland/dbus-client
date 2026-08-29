@@ -1,3 +1,11 @@
+# Unreleased
+
+## Added
+
+## Fixed
+
+## Changed
+
 # 0.3.26 (2026-08-29 / c9b253b)
 
 ## Added
