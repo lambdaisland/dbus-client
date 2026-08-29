@@ -60,6 +60,13 @@
   [client name mode]
   (manager-call client 'org.freedesktop.systemd1.Manager/StartUnit name mode))
 
+(defn start-transient-unit
+  "properties: a(sv)
+   aux: a(sa(sv))"
+  [client name mode properties aux]
+  (manager-call client 'org.freedesktop.systemd1.Manager/StartTransientUnit
+                name mode properties aux))
+
 (defn stop-unit [client name mode]
   (manager-call client 'org.freedesktop.systemd1.Manager/StopUnit name mode))
 

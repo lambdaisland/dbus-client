@@ -70,8 +70,46 @@ client
    :interface "org.freedesktop.DBus.Introspectable"}})
 
 
-(client/introspect client {:destination "org.freedesktop.secrets"
-                           :path "/org/freedesktop/secrets"})
+(client/introspect client "org.freedesktop.systemd1" "/org/freedesktop/LogControl1")
+
+(client/call client
+             ['org.freedesktop.DBus.Properties/Get
+              "org.freedesktop.systemd1" "/org/freedesktop/LogControl1"
+              "org.freedesktop.LogControl1" "LogTarget"])
+
+(client/method-sig client
+                   {:interface "org.freedesktop.DBus.Properties"
+                    :member "Get"
+                    :destination "org.freedesktop.systemd1"
+                    :path "/"})
+
+(time
+ (client/fetch-signature client
+                         {:interface "org.freedesktop.DBus.Properties"
+                          :member "Get"
+                          :destination "org.freedesktop.systemd1"
+                          :path "/"}))
+
+(get-in
+ @(:interfaces client)
+ ["org.freedesktop.systemd1" "/" "org.freedesktop.DBus.Properties"  ])
+(:body
+ @(client/write-message client
+                        {:type :method-call
+                         :headers
+                         {:interface "org.freedesktop.DBus.ObjectManager"
+                          :member "GetManagedObjects"
+                          :destination "org.freedesktop.systemd1"
+                          :path "/"}}))
+
+(:body
+ @(client/write-message client
+                        {:type :method-call
+                         :headers
+                         {:interface   "org.freedesktop.DBus.Introspectable"
+                          :member      "Introspect"
+                          :destination "org.freedesktop.systemd1"
+                          :path "/org/freedesktop/systemd1"}}))
 
 (def client (client/init-client! (client/system-sock)))
 
@@ -108,3 +146,22 @@ client
 ;;     :serial 4,
 ;;     :headers
 ;;     {:destination ":1.388124", :reply-serial 3, :sender "org.freedesktop.DBus"}}
+
+
+{:interface   ""
+ :member      ""
+ :destination
+ :path }
+
+;; Vector form
+[org.freedesktop.DBus.Introspectable/Introspect
+ "org.freedesktop.systemd1"
+ "/org/freedesktop/systemd1"
+ 1 2 3
+ ]
+
+;; Map form
+{:method 'org.freedesktop.DBus.Introspectable/Introspect
+ :dest "org.freedesktop.systemd1"
+ :path "/org/freedesktop/systemd1"
+ :body [1 2 3]}
