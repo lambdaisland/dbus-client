@@ -46,6 +46,9 @@ quite good at handling, someone just needs to implement (de)serialisation of the
 wire format. This library does that, as well as offering a message processing
 loop, and a number of utility namespaces, to be a bit more "batteries included".
 
+The library has only one dependency (`org.clojure/data.xml`, for parsing
+introspection results), and is Babashka compatible.
+
 ## Usage
 
 The main namespace is `lambdaisland.dbus.client`. We'll also load the `bus`

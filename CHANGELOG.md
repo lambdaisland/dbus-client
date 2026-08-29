@@ -2,14 +2,6 @@
 
 ## Added
 
-## Fixed
-
-## Changed
-
-# 0.3.26 (2026-08-29 / c9b253b)
-
-## Added
-
 - `lambdaisland.dbus.bus` - wrapper for the org.freedesktop.DBus interface (list-names, request-name, add-match, get-id, etc.)
 - `lambdaisland.dbus.std` - wrapper for org.freedesktop.DBus.Peer, org.freedesktop.DBus.Properties, org.freedesktop.DBus.ObjectManager interfaces
 - `lambdaisland.dbus.message` - utility functions over dbus message maps and responses
