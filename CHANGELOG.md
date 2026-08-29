@@ -1,4 +1,4 @@
-# Unreleased
+# 0.4.30 (2026-08-29 / ec11cd9)
 
 ## Added
 
