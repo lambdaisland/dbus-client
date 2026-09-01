@@ -1,0 +1,298 @@
+(ns lambdaisland.dbus.platform
+  "Platform-specific primitives for the D-Bus client (Jolt / Chez Scheme).
+
+  A sibling `platform.clj` provides the same API on the JVM. This file is a
+  `.jolt` file, so Jolt loads it in preference to the portable `.clj`.
+
+  The buffer is a thin bookkeeping layer over `jolt.ffi` native memory; typed
+  reads/writes go through the FFI, with a byte-swap for big-endian order."
+  (:require
+   [jolt.ffi :as ffi]))
+
+(set! *warn-on-reflection* true)
+
+;;; Native bindings: POSIX sockets (libc, resolved from the process)
+
+(ffi/defcfn c-socket "socket" [:int :int :int] :int)
+(ffi/defcfn c-connect "connect" [:int :pointer :int] :int :blocking)
+(ffi/defcfn c-send "send" [:int :pointer :size_t :int] :ssize_t :blocking)
+(ffi/defcfn c-recv "recv" [:int :pointer :size_t :int] :ssize_t :blocking)
+(ffi/defcfn c-close "close" [:int] :int)
+
+;;; Native bindings: libxml2 (declared in deps.edn :jolt/native)
+
+(ffi/defcfn xml-parse-doc "xmlParseDoc" [:string] :pointer)
+(ffi/defcfn xml-free-doc "xmlFreeDoc" [:pointer] :void)
+(ffi/defcfn xml-reader-walker "xmlReaderWalker" [:pointer] :pointer)
+(ffi/defcfn xml-free-text-reader "xmlFreeTextReader" [:pointer] :void)
+(ffi/defcfn xml-text-reader-read "xmlTextReaderRead" [:pointer] :int)
+(ffi/defcfn xml-text-reader-node-type "xmlTextReaderNodeType" [:pointer] :int)
+(ffi/defcfn xml-text-reader-const-name "xmlTextReaderConstName" [:pointer] :string)
+(ffi/defcfn xml-text-reader-const-value "xmlTextReaderConstValue" [:pointer] :string)
+(ffi/defcfn xml-text-reader-is-empty-element "xmlTextReaderIsEmptyElement" [:pointer] :int)
+(ffi/defcfn xml-text-reader-move-to-first-attribute "xmlTextReaderMoveToFirstAttribute" [:pointer] :int)
+(ffi/defcfn xml-text-reader-move-to-next-attribute "xmlTextReaderMoveToNextAttribute" [:pointer] :int)
+(ffi/defcfn xml-text-reader-move-to-element "xmlTextReaderMoveToElement" [:pointer] :int)
+
+;;; Byte order
+
+(defn little-endian [] :LITTLE_ENDIAN)
+
+(defn big-endian [] :BIG_ENDIAN)
+
+;;; Buffer
+
+(deftype Buffer [^:unsynchronized-mutable ptr
+                 ^:unsynchronized-mutable pos
+                 ^:unsynchronized-mutable lim
+                 ^:unsynchronized-mutable cap
+                 ^:unsynchronized-mutable order]
+  Object)
+
+(defn buffer [size]
+  (Buffer. (ffi/alloc size) 0 size size :LITTLE_ENDIAN))
+
+(defn position [^Buffer buf]
+  (.-pos buf))
+
+(defn set-position! [^Buffer buf n]
+  (set! (.-pos buf) n)
+  buf)
+
+(defn limit [^Buffer buf]
+  (.-lim buf))
+
+(defn remaining [^Buffer buf]
+  (- (.-lim buf) (.-pos buf)))
+
+(defn has-remaining? [^Buffer buf]
+  (pos? (- (.-lim buf) (.-pos buf))))
+
+(defn flip! [^Buffer buf]
+  (set! (.-lim buf) (.-pos buf))
+  (set! (.-pos buf) 0)
+  buf)
+
+(defn clear! [^Buffer buf]
+  (set! (.-pos buf) 0)
+  (set! (.-lim buf) (.-cap buf))
+  buf)
+
+(defn compact! [^Buffer buf]
+  (let [n (- (.-lim buf) (.-pos buf))]
+    (ffi/copy (ffi/slice (.-ptr buf) (.-pos buf)) (.-ptr buf) n)
+    (set! (.-pos buf) n)
+    (set! (.-lim buf) (.-cap buf))
+    buf))
+
+(defn order [^Buffer buf]
+  (.-order buf))
+
+(defn set-order! [^Buffer buf order]
+  (set! (.-order buf) order)
+  buf)
+
+;; Big-endian support: the FFI reads/writes native (little-endian) order, so a
+;; big-endian buffer reverses the raw bytes before handing them to the FFI.
+;; Reversing byte arrays avoids bignum bit operations, which are not supported
+;; on Jolt (nor on the JVM).
+
+(defn- reverse-bytes [arr]
+  (let [n (alength arr)
+        rev (byte-array n)]
+    (dotimes [i n]
+      (aset-byte rev i (aget arr (- n 1 i))))
+    rev))
+
+(defn- read-num [^Buffer buf ffi-type size]
+  (let [off (.-pos buf)]
+    (set! (.-pos buf) (+ off size))
+    (if (= :BIG_ENDIAN (.-order buf))
+      (let [bytes (ffi/read-array (ffi/slice (.-ptr buf) off) size)
+            tmp (ffi/alloc size)]
+        (try
+          (ffi/write-array tmp (reverse-bytes bytes))
+          (ffi/read tmp ffi-type)
+          (finally (ffi/free tmp))))
+      (ffi/read (.-ptr buf) ffi-type off))))
+
+(defn- write-num [^Buffer buf ffi-type v size]
+  (let [off (.-pos buf)]
+    (if (= :BIG_ENDIAN (.-order buf))
+      (let [tmp (ffi/alloc size)]
+        (try
+          (ffi/write tmp ffi-type v)
+          (ffi/write-array (ffi/slice (.-ptr buf) off)
+                           (reverse-bytes (ffi/read-array tmp size)))
+          (finally (ffi/free tmp))))
+      (ffi/write (.-ptr buf) ffi-type v off))
+    (set! (.-pos buf) (+ off size))
+    buf))
+
+(defn get-byte [^Buffer buf]
+  (let [off (.-pos buf)]
+    (set! (.-pos buf) (+ off 1))
+    (ffi/read (.-ptr buf) :int8 off)))
+
+(defn get-byte-at [^Buffer buf i]
+  (ffi/read (.-ptr buf) :int8 i))
+
+(defn get-int16 [^Buffer buf]
+  (read-num buf :int16 2))
+
+(defn get-int32 [^Buffer buf]
+  (read-num buf :int32 4))
+
+(defn get-int32-at [^Buffer buf i]
+  (if (= :BIG_ENDIAN (.-order buf))
+    (let [bytes (ffi/read-array (ffi/slice (.-ptr buf) i) 4)
+          tmp (ffi/alloc 4)]
+      (try
+        (ffi/write-array tmp (reverse-bytes bytes))
+        (ffi/read tmp :int32)
+        (finally (ffi/free tmp))))
+    (ffi/read (.-ptr buf) :int32 i)))
+
+(defn get-int64 [^Buffer buf]
+  (read-num buf :int64 8))
+
+(defn get-double [^Buffer buf]
+  (read-num buf :double 8))
+
+(defn get-bytes [^Buffer buf n]
+  (let [arr (ffi/read-array (ffi/slice (.-ptr buf) (.-pos buf)) n)]
+    (set! (.-pos buf) (+ (.-pos buf) n))
+    arr))
+
+(defn put-byte! [^Buffer buf v]
+  (let [off (.-pos buf)]
+    (ffi/write (.-ptr buf) :int8 v off)
+    (set! (.-pos buf) (+ off 1))
+    buf))
+
+(defn put-int16! [^Buffer buf v]
+  (write-num buf :int16 v 2))
+
+(defn put-int32! [^Buffer buf v]
+  (write-num buf :int32 v 4))
+
+(defn put-int32-at! [^Buffer buf i v]
+  (if (= :BIG_ENDIAN (.-order buf))
+    (let [tmp (ffi/alloc 4)]
+      (try
+        (ffi/write tmp :int32 v)
+        (ffi/write-array (ffi/slice (.-ptr buf) i)
+                         (reverse-bytes (ffi/read-array tmp 4)))
+        (finally (ffi/free tmp))))
+    (ffi/write (.-ptr buf) :int32 v i))
+  buf)
+
+(defn put-int64! [^Buffer buf v]
+  (write-num buf :int64 v 8))
+
+(defn put-double! [^Buffer buf v]
+  (write-num buf :double v 8))
+
+(defn put-bytes! [^Buffer buf arr]
+  (ffi/write-array (ffi/slice (.-ptr buf) (.-pos buf)) arr)
+  (set! (.-pos buf) (+ (.-pos buf) (alength arr)))
+  buf)
+
+(defn copy-remaining! [^Buffer dst ^Buffer src]
+  (let [n (- (.-lim src) (.-pos src))]
+    (ffi/copy (ffi/slice (.-ptr src) (.-pos src))
+              (ffi/slice (.-ptr dst) (.-pos dst))
+              n)
+    (set! (.-pos src) (+ (.-pos src) n))
+    (set! (.-pos dst) (+ (.-pos dst) n))
+    dst))
+
+;;; Sockets
+
+(def ^:private af-unix 1)
+(def ^:private sock-stream 1)
+(def ^:private msg-nosignal 0x4000)
+(def ^:private sockaddr-un-len 110)
+
+(defn open-unix-socket [path]
+  (let [fd (c-socket af-unix sock-stream 0)]
+    (when (neg? fd)
+      (throw (ex-info (str "socket failed: " (ffi/errno-message)) {:errno (ffi/errno)})))
+    (let [sa (ffi/alloc sockaddr-un-len)]
+      (try
+        ;; struct sockaddr_un: sa_family_t sun_family (2 bytes, AF_UNIX) +
+        ;; sun_path (NUL-terminated). The allocation is zeroed, so the path is
+        ;; already NUL-terminated after the bytes are written.
+        (ffi/write sa :uint8 1 0)
+        (ffi/write sa :uint8 0 1)
+        (ffi/write-bytes (ffi/slice sa 2) path)
+        (let [rc (c-connect fd sa sockaddr-un-len)]
+          (when (neg? rc)
+            (let [err (ffi/errno)]
+              (c-close fd)
+              (throw (ex-info (str "connect failed: " (ffi/errno-message err))
+                              {:path path :errno err})))))
+        (finally (ffi/free sa))))
+    {:fd fd}))
+
+(defn sock-read [sock ^Buffer buf]
+  (let [n (remaining buf)
+        got (c-recv (:fd sock) (ffi/slice (.-ptr buf) (.-pos buf)) n 0)]
+    (cond
+      (pos? got) (do (set! (.-pos buf) (+ (.-pos buf) got)) got)
+      (zero? got) -1
+      :else got)))
+
+(defn sock-write [sock ^Buffer buf]
+  (let [n (remaining buf)
+        written (c-send (:fd sock) (ffi/slice (.-ptr buf) (.-pos buf)) n msg-nosignal)]
+    (when (pos? written)
+      (set! (.-pos buf) (+ (.-pos buf) written)))
+    written))
+
+(defn close-socket [sock]
+  (c-close (:fd sock)))
+
+;;; Introspection XML
+
+(defn- collect-attrs [reader]
+  (let [m (if (= 1 (xml-text-reader-move-to-first-attribute reader))
+            (loop [m {}]
+              (let [m (assoc m
+                             (keyword (xml-text-reader-const-name reader))
+                             (xml-text-reader-const-value reader))]
+                (if (= 1 (xml-text-reader-move-to-next-attribute reader))
+                  (recur m)
+                  m)))
+            {})]
+    (xml-text-reader-move-to-element reader)
+    m))
+
+(defn- parse-element [reader]
+  (let [tag (keyword (xml-text-reader-const-name reader))
+        attrs (collect-attrs reader)]
+    (if (= 1 (xml-text-reader-is-empty-element reader))
+      {:tag tag :attrs attrs :content []}
+      (loop [content []]
+        (if (= 1 (xml-text-reader-read reader))
+          (case (xml-text-reader-node-type reader)
+            1 (recur (conj content (parse-element reader)))
+            15 {:tag tag :attrs attrs :content content}
+            (recur (conj content (xml-text-reader-const-value reader))))
+          {:tag tag :attrs attrs :content content})))))
+
+(defn parse-xml [s]
+  (let [doc (xml-parse-doc s)]
+    (when (ffi/null? doc)
+      (throw (ex-info "XML parse failed" {:input s})))
+    (try
+      (let [reader (xml-reader-walker doc)]
+        (try
+          (loop []
+            (if (= 1 (xml-text-reader-read reader))
+              (if (= 1 (xml-text-reader-node-type reader))
+                (parse-element reader)
+                (recur))
+              nil))
+          (finally (xml-free-text-reader reader))))
+      (finally (xml-free-doc doc)))))

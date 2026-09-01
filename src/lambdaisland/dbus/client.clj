@@ -1,18 +1,12 @@
 (ns lambdaisland.dbus.client
   "Pure-Clojure DBUS client library"
   (:require
-   [clojure.data.xml :as xml]
    [clojure.string :as str]
    [lambdaisland.dbus.format :as format]
-   [lambdaisland.dbus.message :as msg])
+   [lambdaisland.dbus.message :as msg]
+   [lambdaisland.dbus.platform :as platform])
   (:import
-   (java.io EOFException)
-   (java.net UnixDomainSocketAddress)
-   (java.nio ByteBuffer)
-   (java.nio.channels SocketChannel)
-   (java.nio.charset StandardCharsets)
-   (java.util.concurrent.atomic AtomicInteger)
-   java.util.concurrent.Executors))
+   (java.nio.charset StandardCharsets)))
 
 (set! *warn-on-reflection* true)
 
@@ -27,45 +21,44 @@
 (def ok-response (str "OK" crlf))
 (def agree-unix-fd (str "AGREE_UNIX_FD" crlf))
 
-(defn write-str [^SocketChannel chan ^String s]
-  (let [^bytes b (.getBytes s)]
-    (loop [offset 0]
-      (when (< offset (count b))
-        (let [buf (ByteBuffer/wrap b offset (- (count b) offset))
-              written (.write chan buf)]
-          (recur (+ offset written)))))))
+(defn write-str [sock s]
+  (let [b (.getBytes ^String s)
+        buf (platform/buffer (count b))]
+    (platform/put-bytes! buf b)
+    (platform/flip! buf)
+    (loop []
+      (when (platform/has-remaining? buf)
+        (platform/sock-write sock buf)
+        (recur)))
+    nil))
 
-(defn read-handshake-lines [^SocketChannel chan ^ByteBuffer buffer]
+(defn read-handshake-lines [sock buffer]
   (let [cr 13, lf 10, crlf-len 2]
-    (when (pos? (.remaining buffer))
-      (.read chan buffer))
-    (.flip buffer)
+    (when (pos? (platform/remaining buffer))
+      (platform/sock-read sock buffer))
+    (platform/flip! buffer)
 
     (loop [lines []]
-      (let [limit (.limit buffer)
-            pos (.position buffer)
+      (let [limit (platform/limit buffer)
+            pos (platform/position buffer)
             remaining (- limit pos)]
         (if (< remaining crlf-len)
-          (do (.compact buffer) lines)
+          (do (platform/compact! buffer) lines)
           (let [match-pos (loop [i pos]
                             (if (>= (+ i crlf-len) limit)
                               -1 ; Delimiter not found in remaining data
-                              (if (and (= cr (.get buffer i))
-                                       (= lf (.get buffer (inc i))))
+                              (if (and (= cr (platform/get-byte-at buffer i))
+                                       (= lf (platform/get-byte-at buffer (inc i))))
                                 i ; Match found at index i
                                 (recur (inc i)))))]
-
             (if (= match-pos -1)
               ;; Delimiter not found: Terminate scan.
-              (do (.compact buffer) lines)
-
+              (do (platform/compact! buffer) lines)
               ;; Delimiter Found: Extract line and recurse
               (let [line-length (+ (- match-pos pos) crlf-len)
-                    line-bytes (byte-array line-length)
-                    _ (.get buffer line-bytes 0 line-length) ; Reads from current position (pos) & moves position
+                    line-bytes (platform/get-bytes buffer line-length)
                     line-str (String. line-bytes StandardCharsets/UTF_8)]
-
-                ;; Position is already updated by the .get call!
+                ;; Position is already updated by get-bytes
                 (recur (conj lines line-str))))))))))
 
 (def hello-call
@@ -77,24 +70,23 @@
     :interface "org.freedesktop.DBus"
     :destination "org.freedesktop.DBus"}})
 
-(defn sock-read ^bytes [^ByteBuffer buf ^SocketChannel chan]
-  (.mark buf)
-  (let [len (.read chan buf)]
+(defn sock-read [buf sock]
+  (let [len (platform/sock-read sock buf)]
     (if (< 0 len)
       (let [arr (byte-array len)]
-        (.flip buf)
-        (.get buf arr 0 len)
+        (platform/flip! buf)
+        (platform/get-bytes buf len)
         arr)
       (do
         (println "WARN: read from closed channel")
         (byte-array 0)))))
 
-(defn write-message* [{:keys [^SocketChannel socket ^ByteBuffer buffer serial replies] :as client} msg]
+(defn write-message* [{:keys [socket buffer serial replies] :as client} msg]
   (locking buffer
-    (.clear buffer)
+    (platform/clear! buffer)
     (format/write-message buffer msg)
-    (.flip buffer)
-    (.write socket buffer))
+    (platform/flip! buffer)
+    (platform/sock-write socket buffer))
   nil)
 
 (declare introspect)
@@ -122,8 +114,8 @@
                        :methods member
                        :annotations "org.freedesktop.DBus.Method.NoReply"])))))
 
-(defn write-message [{:keys [^SocketChannel socket ^ByteBuffer buffer serial replies] :as client} msg]
-  (let [serial (.incrementAndGet ^AtomicInteger serial)
+(defn write-message [{:keys [socket buffer serial replies] :as client} msg]
+  (let [serial (swap! serial inc)
         msg    (assoc msg :serial serial)]
     (if-not (reply-expected? client msg)
       (write-message* client msg)
@@ -174,57 +166,50 @@
     (msg/body (write-message client msg))))
 
 (defn read-fully
-  "Reads bytes from the SocketChannel into the buffer until the buffer
+  "Reads bytes from the socket into the buffer until the buffer
   is full (i.e., position reaches limit), or the channel reaches end-of-stream.
   Returns the total number of bytes read in this call."
-  [^SocketChannel channel ^ByteBuffer buffer]
+  [channel buffer]
   (loop [total-read 0]
-    (let [bytes-read (.read channel buffer)]
+    (let [bytes-read (platform/sock-read channel buffer)]
       (cond
         (neg? bytes-read)
-        (throw (EOFException. "Connection closed while attempting to read full message body."))
+        (throw (ex-info "Connection closed while attempting to read full message body." {}))
 
-        (not (.hasRemaining buffer))
+        (not (platform/has-remaining? buffer))
         (+ total-read bytes-read)
 
         :else
         (recur (+ total-read bytes-read))))))
 
 (defn ensure-full-read
-  "Ensures the ByteBuffer contains at least `n` bytes starting from its current
+  "Ensures the buffer contains at least `n` bytes starting from its current
   position. Reads more data from the channel if needed, re-allocating the buffer
   if required. Returns a buffer positioned at the same logical offset, with at
   least `n` bytes available."
-  [^SocketChannel chan ^ByteBuffer buf n]
-  (let [available-bytes (- (.limit buf) (.position buf))]
+  [chan buf n]
+  (let [available-bytes (- (platform/limit buf) (platform/position buf))]
     (if (<= n available-bytes)
       buf
       (let [needed (- n available-bytes)
-            ^ByteBuffer new-buf (doto (format/byte-buffer (max n format/*default-buffer-size*))
-                                  (.order (.order buf)))]
-        (.put new-buf (.slice buf))
-        (let [^ByteBuffer tmp (format/byte-buffer needed)]
+            new-buf (platform/set-order! (format/byte-buffer (max n format/*default-buffer-size*))
+                                         (platform/order buf))]
+        (platform/copy-remaining! new-buf buf)
+        (let [tmp (format/byte-buffer needed)]
           (read-fully chan tmp)
-          (.put new-buf (.flip tmp)))
-        (.flip new-buf)
+          (platform/copy-remaining! new-buf (platform/flip! tmp)))
+        (platform/flip! new-buf)
         new-buf))))
-
-#_(defn peek [^ByteBuffer buf]
-    (str (.order buf)
-         (String. ^bytes (let [ba (byte-array 100)]
-                           (.get (.duplicate buf) ba 0 100)
-                           ba)
-                  StandardCharsets/UTF_8)))
 
 (defn- message-total-length
   "Given a buffer positioned at the start of a message (with at least 16 bytes
   available), return the total on-wire length of the message: the 8-byte-aligned
   header plus the body. Messages are not themselves padded to 8 bytes, so this
   is exactly where the next message begins."
-  [^ByteBuffer buf]
-  (let [start (.position buf)
-        header-len (+ 16 (bit-and (.getInt buf (+ start 12)) 0xffffffff))
-        body-len (bit-and (.getInt buf (+ start 4)) 0xffffffff)
+  [buf]
+  (let [start (platform/position buf)
+        header-len (+ 16 (bit-and (platform/get-int32-at buf (+ start 12)) 0xffffffff))
+        body-len (bit-and (platform/get-int32-at buf (+ start 4)) 0xffffffff)
         pad8 (fn [n] (mod (- 8 (mod n 8)) 8))]
     (+ header-len (pad8 header-len) body-len)))
 
@@ -232,21 +217,21 @@
   "Read a single message starting at `buf`'s current position, reading more from
   `socket` as needed. Returns [msg buf] with buf positioned just past the
   message; buf may be a freshly allocated buffer if the original was too small."
-  [^SocketChannel socket ^ByteBuffer buf]
-  (let [^ByteBuffer buf (ensure-full-read socket buf 16)
-        start (.position buf)
-        _ (.order buf (format/byte-order (case (char (.get buf start))
-                                           \l :LITTLE_ENDIAN
-                                           \B :BIG_ENDIAN)))
+  [socket buf]
+  (let [buf (ensure-full-read socket buf 16)
+        start (platform/position buf)
+        _ (platform/set-order! buf (case (char (platform/get-byte-at buf start))
+                                     \l :LITTLE_ENDIAN
+                                     \B :BIG_ENDIAN))
         message-total (message-total-length buf)
-        ^ByteBuffer buf (ensure-full-read socket buf message-total)
-        msg-start (.position buf)]
+        buf (ensure-full-read socket buf message-total)
+        msg-start (platform/position buf)]
     (binding [format/*buffer-offset* msg-start]
       (let [{:keys [headers body-length] :as msg} (format/read-message-header buf)
             sig (:signature headers)
             body (when (and sig (pos? body-length))
                    (format/read-body buf sig))]
-        (.position buf (int (+ msg-start message-total)))
+        (platform/set-position! buf (+ msg-start message-total))
         [(cond-> msg body (assoc :body body)) buf]))))
 
 (defn- dispatch! [client msg]
@@ -255,21 +240,21 @@
       (swap! (:replies client) dissoc reply-serial)
       (deliver reply msg))
     (when-let [handler (:handler client)]
-      (.execute ^java.util.concurrent.Executor (:executor client) #(handler msg)))))
+      (future (handler msg)))))
 
 (defn- process-messages
   "Dispatch every complete message currently buffered, leaving buf positioned at
   the start of any trailing partial message. Returns buf."
-  [client ^ByteBuffer buf]
-  (let [^SocketChannel socket (:socket client)]
-    (loop [^ByteBuffer buf buf]
-      (if (>= (- (.limit buf) (.position buf)) 16)
-        (let [[msg ^ByteBuffer buf] (read-message* socket buf)]
+  [client buf]
+  (let [socket (:socket client)]
+    (loop [buf buf]
+      (if (>= (- (platform/limit buf) (platform/position buf)) 16)
+        (let [[msg buf] (read-message* socket buf)]
           (dispatch! client msg)
           (recur buf))
         buf))))
 
-(defn init-client! [^SocketChannel chan & [handler]]
+(defn init-client! [chan & [handler]]
   (write-str chan
              (str auth-external
                   data-cmd
@@ -277,7 +262,7 @@
                   begin-cmd))
   (let [buf             (format/byte-buffer)
         read-buf        (format/byte-buffer)
-        serial          (AtomicInteger. 0)
+        serial          (atom 0)
         replies         (atom {})
         interfaces      (atom {})
         read-loop-error (promise)
@@ -285,7 +270,6 @@
                           (if-let [[_ id] (re-find #"OK ([0-9a-f]*)\r\n" line)]
                             id
                             (recur lines)))
-        executor        (Executors/newSingleThreadExecutor)
         client          {:socket          chan
                          :buffer          buf
                          :read-buf        read-buf
@@ -293,17 +277,16 @@
                          :replies         replies
                          :serial          serial
                          :handler         handler
-                         :executor        executor
                          :read-loop-error read-loop-error
                          :interfaces      interfaces}]
     (future
       (try
         (loop [buf read-buf]
-          (let [len (.read chan buf)]
+          (let [len (platform/sock-read chan buf)]
             (when (pos? len)
-              (.flip buf)
-              (let [^ByteBuffer buf (process-messages client buf)]
-                (.compact buf)
+              (platform/flip! buf)
+              (let [buf (process-messages client buf)]
+                (platform/compact! buf)
                 (recur buf)))))
         (catch Throwable t
           (println "ERR" t)
@@ -313,8 +296,8 @@
     (let [hello-reply (write-message client hello-call)]
       (assoc client :assigned-name (msg/body hello-reply)))))
 
-(defn sock-conn ^SocketChannel [^String sock-loc]
-  (SocketChannel/open (UnixDomainSocketAddress/of sock-loc)))
+(defn sock-conn [sock-loc]
+  (platform/open-unix-socket sock-loc))
 
 (defn session-sock []
   (let [[_ path] (re-find #"unix:path=(.*)" (System/getenv "DBUS_SESSION_BUS_ADDRESS"))]
@@ -370,14 +353,10 @@
                     :destination destination
                     :path        path}})
                  msg/body)]
-    ;; Remove doctype, or we get
-    ;; 1. Unhandled javax.xml.stream.XMLStreamException
-    ;; ParseError at [row,col]:[1,3] Message: The markup declarations contained or
-    ;; pointed to by the document type declaration must be well-formed.
-    ;; XMLStreamReaderImpl.java:  652  com.sun.org.apache.xerces.internal.impl.XMLStreamReaderImpl/next
+    ;; Remove doctype, or we get a parse error on the DTD declaration.
     (-> body
         (str/replace #"^<!DOCTYPE[^>]+>" "")
-        xml/parse-str)))
+        platform/parse-xml)))
 
 (defn introspect
   ([client {:keys [destination path]}]

@@ -1,4 +1,5 @@
 .cpcache
+.jolt
 .nrepl-port
 target
 repl

@@ -3,6 +3,10 @@
  :deps
  {org.clojure/data.xml {:mvn/version "0.0.8"}}
 
+ :jolt/native
+ [{:name "libxml2"
+   :linux ["libxml2.so.2" "libxml2.so"]}]
+
  :aliases
  {:dev
   {:extra-paths ["dev"]
