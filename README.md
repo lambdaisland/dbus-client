@@ -4,7 +4,7 @@
 [![cljdoc badge](https://cljdoc.org/badge/com.lambdaisland/dbus-client)](https://cljdoc.org/d/com.lambdaisland/dbus-client) [![Clojars Project](https://img.shields.io/clojars/v/com.lambdaisland/dbus-client.svg)](https://clojars.org/com.lambdaisland/dbus-client)
 <!-- /badges -->
 
-Pure-clojure DBUS client
+Pure-clojure DBUS client, Babashka-compatible
 
 ## Features
 
@@ -39,7 +39,7 @@ system level (via the system bus), and by desktop environments and applications
 
 In Clojure it would be natural to consume something like this through its Java
 bindings, but the Java D-Bus library is based on reflection of Java classes and
-methods, which doesn't work with a dynamically types language like Clojure.
+methods, which doesn't work with a dynamically typed language like Clojure.
 
 At the end of the day it's just data over the wire, something which Clojure is
 quite good at handling, someone just needs to implement (de)serialisation of the

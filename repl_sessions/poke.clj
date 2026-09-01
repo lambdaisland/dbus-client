@@ -1,25 +1,78 @@
 (ns repl-sessions.poke
   (:require
-   [lambdaisland.dbus.client :as client]
+   [lambdaisland.dbus.bus :as bus]
+   [lambdaisland.dbus.client :as dbus]
    [lambdaisland.dbus.systemd :as systemd]))
 
-(def client (client/init-client! (client/system-sock) (fn [v]
-                                                        (prn '-> v))))
+(def client (dbus/init-client! (dbus/session-sock) #_(dbus/system-sock) (fn [v]
+                                                                          (prn '-> v))))
 
-(let [client (client/init-client! (client/session-sock)
-                                  (fn [v]
-                                    (prn '-> v)))
+
+(bus/list-names client)
+(dbus/ls client "org.freedesktop.Notifications" "/")
+;; => ("/org")
+(dbus/ls client "org.freedesktop.Notifications" "/org")
+;; => ("/org/erikreider" "/org/freedesktop")
+(dbus/ls client "org.freedesktop.Notifications" "/org/freedesktop")
+;; => ("/org/freedesktop/Notifications")
+
+(dbus/ls client "org.freedesktop.Notifications" "/org/erikreider")
+;; => ("/org/erikreider/swaync")
+(dbus/ls client "org.freedesktop.Notifications" "/org/erikreider/swaync/window/1")
+(dbus/ls client "org.freedesktop.Notifications" "/org/erikreider/swaync/cc")
+;; => ("/org/erikreider/swaync/window" "/org/erikreider/swaync/cc")
+
+(dbus/path-info client {:destination "org.freedesktop.Notifications"
+                        :path "/org/freedesktop/Notifications"})
+
+(bus/add-match client
+               {:type      "signal"
+                :sender    "org.freedesktop.Notifications"
+                :interface "org.freedesktop.Notifications"
+                :member    "NotificationClosed"
+                :path      "/org/freedesktop/Notifications"})
+(dbus/call client
+           [:org.freedesktop.Notifications/Notify
+            "org.freedesktop.Notifications"
+            "/org/freedesktop/Notifications"
+            "App name"
+            0
+            ""
+            "Cool summary"
+            "Hello from Clojure!"
+            []
+            []
+            10000])
+;; => 127
+
+(dbus/call client
+           ['org.freedesktop.Notifications/Notify
+            "org.freedesktop.Notifications"
+            "/org/freedesktop/Notifications"
+            "App name"
+            126
+            ""
+            "Cool summary"
+            "Hello from Clojure again!"
+            []
+            []
+            10000
+            ])
+
+(let [client (dbus/init-client! (dbus/session-sock)
+                                (fn [v]
+                                  (prn '-> v)))
       buf (format/byte-buffer)]
-  (client/sock-read (:buffer )))
+  (dbus/sock-read (:buffer )))
 
-(def client (client/init-client! (client/session-sock)
+(def client (dbus/init-client! (dbus/session-sock)
                                  (fn [v]
                                    (prn '-> v))))
 
 client
 
-(client/write-message client client/hello-call)
-@(client/write-message
+(dbus/write-message client dbus/hello-call)
+@(dbus/write-message
   client
   {:type :method-call
    :headers
@@ -49,7 +102,7 @@ client
     :interface "org.freedesktop.DBus.Peer"}})
 
 (defn poke! [msg]
-  @(client/write-message
+  @(dbus/write-message
     client
     msg))
 
@@ -70,48 +123,48 @@ client
    :interface "org.freedesktop.DBus.Introspectable"}})
 
 
-(client/introspect client "org.freedesktop.systemd1" "/org/freedesktop/LogControl1")
+(dbus/introspect client "org.freedesktop.systemd1" "/org/freedesktop/LogControl1")
 
-(client/call client
-             ['org.freedesktop.DBus.Properties/Get
-              "org.freedesktop.systemd1" "/org/freedesktop/LogControl1"
-              "org.freedesktop.LogControl1" "LogTarget"])
+(dbus/call client
+           ['org.freedesktop.DBus.Properties/Get
+            "org.freedesktop.systemd1" "/org/freedesktop/LogControl1"
+            "org.freedesktop.LogControl1" "LogTarget"])
 
-(client/method-sig client
-                   {:interface "org.freedesktop.DBus.Properties"
-                    :member "Get"
-                    :destination "org.freedesktop.systemd1"
-                    :path "/"})
+(dbus/method-sig client
+                 {:interface "org.freedesktop.DBus.Properties"
+                  :member "Get"
+                  :destination "org.freedesktop.systemd1"
+                  :path "/"})
 
 (time
- (client/fetch-signature client
-                         {:interface "org.freedesktop.DBus.Properties"
-                          :member "Get"
-                          :destination "org.freedesktop.systemd1"
-                          :path "/"}))
+ (dbus/fetch-signature client
+                       {:interface "org.freedesktop.DBus.Properties"
+                        :member "Get"
+                        :destination "org.freedesktop.systemd1"
+                        :path "/"}))
 
 (get-in
  @(:interfaces client)
  ["org.freedesktop.systemd1" "/" "org.freedesktop.DBus.Properties"  ])
 (:body
- @(client/write-message client
-                        {:type :method-call
-                         :headers
-                         {:interface "org.freedesktop.DBus.ObjectManager"
-                          :member "GetManagedObjects"
-                          :destination "org.freedesktop.systemd1"
-                          :path "/"}}))
+ @(dbus/write-message client
+                      {:type :method-call
+                       :headers
+                       {:interface "org.freedesktop.DBus.ObjectManager"
+                        :member "GetManagedObjects"
+                        :destination "org.freedesktop.systemd1"
+                        :path "/"}}))
 
 (:body
- @(client/write-message client
-                        {:type :method-call
-                         :headers
-                         {:interface   "org.freedesktop.DBus.Introspectable"
-                          :member      "Introspect"
-                          :destination "org.freedesktop.systemd1"
-                          :path "/org/freedesktop/systemd1"}}))
+ @(dbus/write-message client
+                      {:type :method-call
+                       :headers
+                       {:interface   "org.freedesktop.DBus.Introspectable"
+                        :member      "Introspect"
+                        :destination "org.freedesktop.systemd1"
+                        :path "/org/freedesktop/systemd1"}}))
 
-(def client (client/init-client! (client/system-sock)))
+(def client (dbus/init-client! (dbus/system-sock)))
 
 (doseq [p (map :object-path (systemd/list-units client))]
   (println "----" p "-----")
